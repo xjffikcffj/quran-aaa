@@ -1,0 +1,59 @@
+<resources>
+    <string name="app_name">القرآن الصوتي</string>
+    <string name="tab_surahs">السور</string>
+    <string name="tab_reciters">القراء</string>
+    <string name="tab_downloads">التنزيلات</string>
+    <string name="tab_bookmarks">الإشارات</string>
+    <string name="tab_developer">لوحة المطور</string>
+    
+    <string name="search_surahs_hint">ابحث باسم السورة أو رقمها…</string>
+    <string name="search_no_results">لا توجد سور مطابقة لبحثك</string>
+    <string name="verses_count">%d آية</string>
+    <string name="surah_number">سورة رقم %d</string>
+    
+    <string name="player_now_playing">قيد الاستماع الآن</string>
+    <string name="player_play">تشغيل</string>
+    <string name="player_pause">إيقاف مؤقت</string>
+    <string name="player_stop">إيقاف</string>
+    <string name="player_next">السورة التالية</string>
+    <string name="player_previous">السورة السابقة</string>
+    <string name="player_repeat_none">إيقاف التكرار</string>
+    <string name="player_repeat_one">تكرار السورة الحالية</string>
+    <string name="player_repeat_all">تشغيل متتالي تلقائي</string>
+    
+    <string name="sleep_timer_title">مؤقت النوم</string>
+    <string name="sleep_timer_off">معطل</string>
+    <string name="sleep_timer_end_of_surah">عند نهاية السورة</string>
+    <string name="sleep_timer_minutes">%d دقيقة</string>
+    <string name="sleep_timer_remaining">ينتهي خلال: %s</string>
+    
+    <string name="bookmark_add">إضافة إشارة مرجعية</string>
+    <string name="bookmark_note_hint">ملاحظة اختيارية (مثل: موضع الحفظ أو التدبر)…</string>
+    <string name="bookmark_saved">تم حفظ الإشارة المرجعية بنجاح</string>
+    <string name="bookmark_delete">حذف الإشارة</string>
+    <string name="bookmarks_empty">لا توجد إشارات مرجعية محفوظة بعد</string>
+    
+    <string name="download_action">تنزيل السورة</string>
+    <string name="download_status_downloading">جاري التنزيل: %d%%</string>
+    <string name="download_status_completed">تم التنزيل (جاهزة دون إنترنت)</string>
+    <string name="download_status_failed">تعذر التنزيل، اضغط لإعادة المحاولة</string>
+    <string name="download_delete">حذف الملف المنزّل</string>
+    <string name="downloads_empty">لم تقم بتنزيل أي سور بعد</string>
+    <string name="downloads_info">السور المنزلة تعمل دون اتصال بالإنترنت للقارئ المحدد</string>
+    
+    <string name="reciters_title">اختر القارئ المفضل</string>
+    <string name="reciter_full_quran">المصحف كاملاً (114 سورة)</string>
+    <string name="reciter_partial_quran">%d سورة مسجلة متوفرة</string>
+    <string name="reciter_not_available_alert">تسجيل هذه السورة غير متوفر حالياً لهذا القارئ</string>
+    
+    <string name="dev_panel_title">لوحة الإدارة والتطوير</string>
+    <string name="dev_custom_reciters">إدارة القراء المخصصين</string>
+    <string name="dev_add_reciter">إضافة قارئ جديد</string>
+    <string name="dev_backup_restore">النسخ الاحتياطي والاستعادة</string>
+    <string name="dev_friday_reminder">تذكير يوم الجمعة (سورة الكهف)</string>
+    <string name="dev_cloud_notice">الخدمات السحابية وقواعد البيانات المركزية</string>
+    <string name="dev_admob_status">حالة Google AdMob الإعلانية</string>
+    
+    <string name="friday_notification_title">تذكير يوم الجمعة المباركة</string>
+    <string name="friday_notification_body">نور ما بين الجمعتين: حان وقت الاستماع إلى سورة الكهف الشريفة.</string>
+</resources>
