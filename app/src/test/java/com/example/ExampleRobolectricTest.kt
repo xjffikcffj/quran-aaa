@@ -10,7 +10,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [35])
 class ExampleRobolectricTest {
 
   @Test
@@ -25,12 +25,15 @@ class ExampleRobolectricTest {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val url = "https://cdn.mp3quran.net/audio/mishary-alafasy/r1/001.mp3"
     val ds = org.robolectric.shadows.util.DataSource.toDataSource(url)
-    org.robolectric.shadows.ShadowMediaPlayer.addMediaInfo(ds, org.robolectric.shadows.ShadowMediaPlayer.MediaInfo(180000, 0))
+    org.robolectric.shadows.ShadowMediaPlayer.addMediaInfo(
+      ds,
+      org.robolectric.shadows.ShadowMediaPlayer.MediaInfo(180000, 0)
+    )
 
     val playerManager = com.example.player.PlayerManager.getInstance(context)
     val surah = com.example.data.QuranData.getSurahById(1)!!
     playerManager.playSurah(surah, autoPlay = true)
-    
+
     // Check state while buffering
     org.junit.Assert.assertEquals(1, playerManager.playerState.value.currentSurah?.id)
   }
@@ -221,12 +224,18 @@ class ExampleRobolectricTest {
     receiver.onReceive(context, alarmIntent)
 
     // Verify notification was posted
-    val notificationManager = androidx.core.app.NotificationManagerCompat.from(context)
     val shadowNotificationManager = org.robolectric.Shadows.shadowOf(
       context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
     )
     val notifications = shadowNotificationManager.allNotifications
-    org.junit.Assert.assertTrue(notifications.any { it.extras.getString(androidx.core.app.NotificationCompat.EXTRA_TITLE)?.contains("سورة الكهف") == true || it.extras.getString(androidx.core.app.NotificationCompat.EXTRA_TITLE)?.contains("الجمعة") == true })
+    org.junit.Assert.assertTrue(
+      notifications.any {
+        it.extras.getString(androidx.core.app.NotificationCompat.EXTRA_TITLE)
+          ?.contains("سورة الكهف") == true ||
+          it.extras.getString(androidx.core.app.NotificationCompat.EXTRA_TITLE)
+            ?.contains("الجمعة") == true
+      }
+    )
 
     // Verify next alarm was scheduled
     val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
@@ -260,8 +269,15 @@ class ExampleRobolectricTest {
       "User-Agent" to "Mozilla/5.0 (Linux; Android 14) QuranAudio/1.0",
       "Accept" to "*/*"
     )
-    val ds = org.robolectric.shadows.util.DataSource.toDataSource(context, android.net.Uri.parse(url), headers)
-    org.robolectric.shadows.ShadowMediaPlayer.addMediaInfo(ds, org.robolectric.shadows.ShadowMediaPlayer.MediaInfo(180000, 0))
+    val ds = org.robolectric.shadows.util.DataSource.toDataSource(
+      context,
+      android.net.Uri.parse(url),
+      headers
+    )
+    org.robolectric.shadows.ShadowMediaPlayer.addMediaInfo(
+      ds,
+      org.robolectric.shadows.ShadowMediaPlayer.MediaInfo(180000, 0)
+    )
 
     // Set repeat mode to ALL so we test that END_OF_SURAH intercepts and prevents advancing
     playerManager.setRepeatMode(com.example.model.RepeatMode.ALL)
