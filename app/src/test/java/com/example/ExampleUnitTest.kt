@@ -303,6 +303,111 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun testId3OnlyFakeAndRandomTrailingBytesAreRejected() {
+        // 1. Valid ID3v2.3 header (tagSize = 10) followed by 4 arbitrary non-MPEG bytes (was falsely accepted before!)
+        val id3PlusRandomBytes = byteArrayOf(
+            0x49, 0x44, 0x33, 0x03, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x0A,
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88.toByte(), 0x99.toByte(), 0xAA.toByte(),
+            0x01, 0x02, 0x03, 0x04
+        )
+        assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(id3PlusRandomBytes))
+
+        // 2. Valid ID3v2 header followed only by zeros / padding without any MPEG audio frame
+        val id3OnlyZeros = ByteArray(128).apply {
+            this[0] = 0x49; this[1] = 0x44; this[2] = 0x33
+            this[3] = 0x03; this[4] = 0x00; this[5] = 0x00
+            this[9] = 0x10 // tagSize = 16 -> audioOffset = 26
+        }
+        assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(id3OnlyZeros))
+
+        // 3. Valid ID3v2 header followed by bogus sync bytes (e.g. Layer I / free bitrate / reserved sample rate)
+        val id3PlusBogusSync = ByteArray(64).apply {
+            this[0] = 0x49; this[1] = 0x44; this[2] = 0x33
+            this[3] = 0x03
+            this[9] = 0x0A // audioOffset = 20
+            this[20] = 0xFF.toByte()
+            this[21] = 0xE0.toByte() // reserved version + layer 00
+            this[22] = 0x00
+            this[23] = 0x00
+        }
+        assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(id3PlusBogusSync))
+
+        // 4. Corrupt ID3 header (invalid version 0x05)
+        val corruptVersionId3 = byteArrayOf(
+            0x49, 0x44, 0x33, 0x05, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x00
+        )
+        assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(corruptVersionId3))
+
+        // 5. Corrupt ID3 header (non-synchsafe size bit 0x80 set)
+        val corruptSynchsafeId3 = byteArrayOf(
+            0x49, 0x44, 0x33, 0x03, 0x00, 0x00,
+            0x00, 0x00, 0x80.toByte(), 0x0A,
+            0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x00
+        )
+        assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(corruptSynchsafeId3))
+    }
+
+    @Test
+    fun testValidId3WithPaddingAndHeaderlessMp3AndLargeId3FileAreAccepted() {
+        // 1. Valid ID3v2.3 + padding zeros + valid MPEG-1 Layer III frame (0xFF 0xFB 0x92 0x00)
+        val id3WithPaddingAndMpeg = ByteArray(1024).apply {
+            this[0] = 0x49; this[1] = 0x44; this[2] = 0x33
+            this[3] = 0x03
+            this[9] = 0x20 // tagSize = 32 -> audioOffset = 42
+            // Leave bytes 42..399 as padding 0x00, place MPEG frame at 400
+            this[400] = 0xFF.toByte()
+            this[401] = 0xFB.toByte()
+            this[402] = 0x92.toByte()
+            this[403] = 0x00
+        }
+        assertTrue(com.example.download.DownloadManager.hasValidMp3HeaderBytes(id3WithPaddingAndMpeg))
+
+        // 2. Headerless MP3 (no ID3 header, leading zero padding then valid MPEG frame)
+        val headerlessMp3 = ByteArray(256).apply {
+            this[16] = 0xFF.toByte()
+            this[17] = 0xFA.toByte() // MPEG-1 Layer III with CRC disabled=0 bit
+            this[18] = 0x90.toByte()
+            this[19] = 0x00
+        }
+        assertTrue(com.example.download.DownloadManager.hasValidMp3HeaderBytes(headerlessMp3))
+
+        // 3. Large ~50KB ID3v2 tag (mimicking archive.org Abdulrazzaq Al-Dulaimi cover art) on disk
+        val validLargeFile = java.io.File.createTempFile("valid_large_id3_", ".mp3")
+        val fakeLargeFile = java.io.File.createTempFile("fake_large_id3_", ".mp3")
+        try {
+            val tagSize = 48_991 // same scale as 001.mp3 on archive.org
+            val audioOffset = 10 + tagSize
+            val bytes = ByteArray(audioOffset + 4096).apply {
+                this[0] = 0x49; this[1] = 0x44; this[2] = 0x33
+                this[3] = 0x03
+                this[6] = ((tagSize shr 21) and 0x7F).toByte()
+                this[7] = ((tagSize shr 14) and 0x7F).toByte()
+                this[8] = ((tagSize shr 7) and 0x7F).toByte()
+                this[9] = (tagSize and 0x7F).toByte()
+                this[audioOffset] = 0xFF.toByte()
+                this[audioOffset + 1] = 0xFB.toByte()
+                this[audioOffset + 2] = 0x92.toByte()
+                this[audioOffset + 3] = 0x00
+            }
+            validLargeFile.writeBytes(bytes)
+            assertTrue(com.example.download.DownloadManager.isValidMp3File(validLargeFile))
+
+            // Same large ID3v2 header without an MPEG frame at audioOffset must fail!
+            bytes[audioOffset] = 0x00
+            bytes[audioOffset + 1] = 0x00
+            bytes[audioOffset + 2] = 0x00
+            fakeLargeFile.writeBytes(bytes)
+            assertFalse(com.example.download.DownloadManager.isValidMp3File(fakeLargeFile))
+        } finally {
+            validLargeFile.delete()
+            fakeLargeFile.delete()
+        }
+    }
+
+    @Test
     fun testCustomReciterHttpsValidation() {
         assertTrue(com.example.model.Reciter.isValidHttpsServerUrl("https://cdn.example.com/audio/"))
         assertTrue(com.example.model.Reciter.isValidHttpsServerUrl("https://archive.org/download/mmmmmm002_20220618"))

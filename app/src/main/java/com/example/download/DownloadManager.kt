@@ -16,6 +16,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -25,21 +27,38 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.io.RandomAccessFile
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 class DownloadManager(private val context: Context) {
 
     private class ActiveTask(
         val taskId: String,
+        val generation: Long,
         @Volatile var job: Job? = null,
         @Volatile var call: Call? = null
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val activeTasks = ConcurrentHashMap<String, ActiveTask>()
+    private val downloadGenerations = ConcurrentHashMap<String, AtomicLong>()
+    private val downloadMutexes = ConcurrentHashMap<String, Mutex>()
+
+    private fun nextGeneration(downloadId: String): Long {
+        return downloadGenerations.computeIfAbsent(downloadId) { AtomicLong(0L) }.incrementAndGet()
+    }
+
+    private fun currentGeneration(downloadId: String): Long {
+        return downloadGenerations[downloadId]?.get() ?: 0L
+    }
+
+    private fun mutexFor(downloadId: String): Mutex {
+        return downloadMutexes.computeIfAbsent(downloadId) { Mutex() }
+    }
 
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -142,6 +161,7 @@ class DownloadManager(private val context: Context) {
 
         val downloadId = "${reciter.id}_${surah.id}"
         val taskId = UUID.randomUUID().toString()
+        val taskGen = nextGeneration(downloadId)
 
         // Cancel any previous task and its live HTTP call immediately
         activeTasks.remove(downloadId)?.let { previous ->
@@ -149,122 +169,148 @@ class DownloadManager(private val context: Context) {
             previous.job?.cancel()
         }
 
-        val taskHolder = ActiveTask(taskId = taskId)
+        val taskHolder = ActiveTask(taskId = taskId, generation = taskGen)
         val job = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             val audioUrl = reciter.getAudioUrl(surah.id)
             val finalFile = getLocalAudioFile(reciter.id, surah.id)
             val tempFile = File(tempDir, "${downloadId}_${taskId}.part")
-            val hadValidExistingFile = finalFile.exists() && isValidMp3File(finalFile)
-
-            val initialEntity = DownloadEntity(
-                id = downloadId,
-                surahNumber = surah.id,
-                surahName = surah.name,
-                reciterId = reciter.id,
-                reciterName = reciter.name,
-                localFilePath = finalFile.absolutePath,
-                fileSizeBytes = if (hadValidExistingFile) finalFile.length() else 0L,
-                status = if (hadValidExistingFile) DownloadStatus.COMPLETED.name else DownloadStatus.DOWNLOADING.name,
-                progress = if (hadValidExistingFile) 100 else 0,
-                errorMessage = null
-            )
-
-            // If completed valid file is already present, verify/preserve it without re-downloading
-            if (hadValidExistingFile) {
-                QuranApp.database.downloadDao().insertOrUpdate(initialEntity)
-                activeTasks.remove(downloadId, taskHolder)
-                return@launch
+            val isStillCurrent: () -> Boolean = {
+                activeTasks[downloadId]?.taskId == taskId && currentGeneration(downloadId) == taskGen
             }
 
-            val downloadingEntity = initialEntity.copy(
+            var hadValidExistingFile = false
+            var existingValidEntity: DownloadEntity? = null
+
+            val preparedToProceed = mutexFor(downloadId).withLock {
+                if (!isStillCurrent()) return@withLock false
+                hadValidExistingFile = finalFile.exists() && isValidMp3File(finalFile)
+                val baseEntity = DownloadEntity(
+                    id = downloadId,
+                    surahNumber = surah.id,
+                    surahName = surah.name,
+                    reciterId = reciter.id,
+                    reciterName = reciter.name,
+                    localFilePath = finalFile.absolutePath,
+                    fileSizeBytes = if (hadValidExistingFile) finalFile.length() else 0L,
+                    status = if (hadValidExistingFile) DownloadStatus.COMPLETED.name else DownloadStatus.DOWNLOADING.name,
+                    progress = if (hadValidExistingFile) 100 else 0,
+                    errorMessage = null
+                )
+                if (hadValidExistingFile) {
+                    existingValidEntity = baseEntity
+                    QuranApp.database.downloadDao().insertOrUpdate(baseEntity)
+                    activeTasks.remove(downloadId, taskHolder)
+                    return@withLock false
+                }
+                existingValidEntity = baseEntity
+                QuranApp.database.downloadDao().insertOrUpdate(
+                    baseEntity.copy(
+                        status = DownloadStatus.DOWNLOADING.name,
+                        progress = 0,
+                        fileSizeBytes = 0L,
+                        errorMessage = null
+                    )
+                )
+                true
+            }
+            if (!preparedToProceed) return@launch
+
+            val downloadingEntity = existingValidEntity!!.copy(
                 status = DownloadStatus.DOWNLOADING.name,
                 progress = 0,
                 fileSizeBytes = 0L,
                 errorMessage = null
             )
-            QuranApp.database.downloadDao().insertOrUpdate(downloadingEntity)
 
             try {
                 downloadWithRetryAndFallback(
                     primaryUrl = audioUrl,
                     tempFile = tempFile,
                     taskHolder = taskHolder,
-                    isCurrentTask = { activeTasks[downloadId]?.taskId == taskId },
+                    isCurrentTask = isStillCurrent,
                     onProgress = { progress, bytes ->
-                        if (activeTasks[downloadId]?.taskId == taskId) {
-                            QuranApp.database.downloadDao().insertOrUpdate(
-                                downloadingEntity.copy(
-                                    progress = progress,
-                                    fileSizeBytes = bytes
+                        mutexFor(downloadId).withLock {
+                            if (isStillCurrent()) {
+                                QuranApp.database.downloadDao().insertOrUpdate(
+                                    downloadingEntity.copy(
+                                        progress = progress,
+                                        fileSizeBytes = bytes
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                 )
 
-                // Guard against race: ensure this task wasn't superseded while writing
-                if (activeTasks[downloadId]?.taskId != taskId) {
-                    tempFile.delete()
-                    return@launch
-                }
-
-                // Atomic move into final destination ONLY after verified MP3 integrity
-                val backupFile = if (finalFile.exists()) {
-                    File(tempDir, "${downloadId}_${taskId}.bak").also { bak ->
-                        finalFile.copyTo(bak, overwrite = true)
+                // Guard against race under per-ID lock before touching final file or Room
+                mutexFor(downloadId).withLock {
+                    if (!isStillCurrent()) {
+                        tempFile.delete()
+                        return@withLock
                     }
-                } else null
 
-                if (finalFile.exists()) {
-                    finalFile.delete()
-                }
+                    // Atomic move into final destination ONLY after verified MP3 integrity
+                    val backupFile = if (finalFile.exists() && isValidMp3File(finalFile)) {
+                        File(tempDir, "${downloadId}_${taskId}.bak").also { bak ->
+                            finalFile.copyTo(bak, overwrite = true)
+                        }
+                    } else null
 
-                val moved = tempFile.renameTo(finalFile)
-                if (!moved) {
-                    tempFile.copyTo(finalFile, overwrite = true)
-                    tempFile.delete()
-                }
+                    if (finalFile.exists()) {
+                        finalFile.delete()
+                    }
 
-                if (!isValidMp3File(finalFile)) {
-                    finalFile.delete()
-                    backupFile?.copyTo(finalFile, overwrite = true)
+                    val moved = tempFile.renameTo(finalFile)
+                    if (!moved) {
+                        tempFile.copyTo(finalFile, overwrite = true)
+                        tempFile.delete()
+                    }
+
+                    if (!isValidMp3File(finalFile)) {
+                        finalFile.delete()
+                        backupFile?.copyTo(finalFile, overwrite = true)
+                        backupFile?.delete()
+                        throw IllegalStateException("الملف الذي تم تنزيله غير صالح أو تالف")
+                    }
                     backupFile?.delete()
-                    throw IllegalStateException("الملف الذي تم تنزيله غير صالح أو تالف")
-                }
-                backupFile?.delete()
 
-                if (activeTasks[downloadId]?.taskId == taskId) {
-                    QuranApp.database.downloadDao().insertOrUpdate(
-                        downloadingEntity.copy(
-                            status = DownloadStatus.COMPLETED.name,
-                            progress = 100,
-                            fileSizeBytes = finalFile.length(),
-                            errorMessage = null
+                    if (isStillCurrent()) {
+                        QuranApp.database.downloadDao().insertOrUpdate(
+                            downloadingEntity.copy(
+                                status = DownloadStatus.COMPLETED.name,
+                                progress = 100,
+                                fileSizeBytes = finalFile.length(),
+                                errorMessage = null
+                            )
                         )
-                    )
+                    }
                 }
             } catch (_: CancellationException) {
                 tempFile.delete()
-                if (activeTasks[downloadId]?.taskId == taskId) {
-                    if (hadValidExistingFile && finalFile.exists()) {
-                        QuranApp.database.downloadDao().insertOrUpdate(initialEntity)
-                    } else {
-                        QuranApp.database.downloadDao().deleteById(downloadId)
+                mutexFor(downloadId).withLock {
+                    if (isStillCurrent()) {
+                        if (hadValidExistingFile && isValidMp3File(finalFile)) {
+                            QuranApp.database.downloadDao().insertOrUpdate(existingValidEntity!!)
+                        } else {
+                            QuranApp.database.downloadDao().deleteById(downloadId)
+                        }
                     }
                 }
             } catch (e: Exception) {
                 tempFile.delete()
-                if (activeTasks[downloadId]?.taskId == taskId) {
-                    val userError = mapDownloadErrorMessage(e)
-                    if (hadValidExistingFile && finalFile.exists()) {
-                        QuranApp.database.downloadDao().insertOrUpdate(initialEntity)
-                    } else {
-                        QuranApp.database.downloadDao().insertOrUpdate(
-                            downloadingEntity.copy(
-                                status = DownloadStatus.FAILED.name,
-                                errorMessage = userError
+                mutexFor(downloadId).withLock {
+                    if (isStillCurrent()) {
+                        val userError = mapDownloadErrorMessage(e)
+                        if (hadValidExistingFile && isValidMp3File(finalFile)) {
+                            QuranApp.database.downloadDao().insertOrUpdate(existingValidEntity!!)
+                        } else {
+                            QuranApp.database.downloadDao().insertOrUpdate(
+                                downloadingEntity.copy(
+                                    status = DownloadStatus.FAILED.name,
+                                    errorMessage = userError
+                                )
                             )
-                        )
+                        }
                     }
                 }
             } finally {
@@ -504,31 +550,59 @@ class DownloadManager(private val context: Context) {
     }
 
     fun cancelDownload(downloadId: String) {
+        val opGen = nextGeneration(downloadId)
         val task = activeTasks.remove(downloadId)
         task?.call?.cancel()
         task?.job?.cancel()
         scope.launch {
-            if (activeTasks.containsKey(downloadId)) return@launch
-            val file = parseDownloadIdToFile(downloadId)
-            val hadValidFile = file != null && isValidMp3File(file)
-            if (!hadValidFile && !activeTasks.containsKey(downloadId)) {
-                QuranApp.database.downloadDao().deleteById(downloadId)
+            mutexFor(downloadId).withLock {
+                if (currentGeneration(downloadId) != opGen || activeTasks.containsKey(downloadId)) {
+                    return@withLock
+                }
+                val file = parseDownloadIdToFile(downloadId)
+                val hadValidFile = file != null && isValidMp3File(file)
+                cleanupTempFilesForDownload(downloadId)
+                if (!hadValidFile) {
+                    QuranApp.database.downloadDao().deleteById(downloadId)
+                }
             }
         }
     }
 
     fun deleteDownload(downloadId: String) {
+        val opGen = nextGeneration(downloadId)
         val task = activeTasks.remove(downloadId)
         task?.call?.cancel()
         task?.job?.cancel()
         scope.launch {
-            val entity = QuranApp.database.downloadDao().getDownloadById(downloadId)
-            if (entity != null) {
-                val file = File(entity.localFilePath)
-                if (file.exists()) file.delete()
+            mutexFor(downloadId).withLock {
+                // Never delete file or Room record if a newer task for this downloadId superseded this delete
+                if (currentGeneration(downloadId) != opGen || activeTasks.containsKey(downloadId)) {
+                    return@withLock
+                }
+                val entity = QuranApp.database.downloadDao().getDownloadById(downloadId)
+                val fallbackFile = parseDownloadIdToFile(downloadId)
+                cleanupTempFilesForDownload(downloadId)
+                if (entity != null) {
+                    val file = File(entity.localFilePath)
+                    if (file.exists()) file.delete()
+                }
+                if (fallbackFile != null && fallbackFile.exists()) {
+                    fallbackFile.delete()
+                }
                 QuranApp.database.downloadDao().deleteById(downloadId)
             }
         }
+    }
+
+    private fun cleanupTempFilesForDownload(downloadId: String) {
+        try {
+            tempDir.listFiles()?.forEach { file ->
+                if (file.name.startsWith("${downloadId}_")) {
+                    file.delete()
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     private fun parseDownloadIdToFile(downloadId: String): File? {
@@ -541,6 +615,7 @@ class DownloadManager(private val context: Context) {
 
     companion object {
         internal const val MIN_VALID_AUDIO_BYTES = 16_384L
+        internal const val MAX_MPEG_SYNC_SEARCH_BYTES = 16_384
         private const val DEFAULT_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) QuranAudio/1.0"
 
@@ -559,6 +634,10 @@ class DownloadManager(private val context: Context) {
             val total: Long?
         )
 
+        private data class Id3v2HeaderInfo(
+            val audioOffset: Long
+        )
+
         private val CONTENT_RANGE_REGEX =
             Regex("^bytes\\s+(\\d+)-(\\d+|\\*)/(\\d+|\\*)$", RegexOption.IGNORE_CASE)
 
@@ -571,26 +650,117 @@ class DownloadManager(private val context: Context) {
             return ContentRangeSpec(start = start, end = end, total = total)
         }
 
+        private fun isNonAudioTextPrefix(bytes: ByteArray, length: Int): Boolean {
+            val prefix = String(bytes, 0, minOf(length, 32), Charsets.UTF_8).trimStart().lowercase(Locale.US)
+            return prefix.startsWith("<html") ||
+                prefix.startsWith("<!doc") ||
+                prefix.startsWith("<?xml") ||
+                prefix.startsWith("{")
+        }
+
+        private fun parseId3v2Header(bytes: ByteArray, length: Int): Id3v2HeaderInfo? {
+            if (length < 10) return null
+            if (bytes[0] != 0x49.toByte() || bytes[1] != 0x44.toByte() || bytes[2] != 0x33.toByte()) {
+                return null
+            }
+            val majorVersion = bytes[3].toInt() and 0xFF
+            val minorVersion = bytes[4].toInt() and 0xFF
+            val flags = bytes[5].toInt() and 0xFF
+            if (majorVersion !in 2..4 || minorVersion == 0xFF) return null
+
+            val b6 = bytes[6].toInt() and 0xFF
+            val b7 = bytes[7].toInt() and 0xFF
+            val b8 = bytes[8].toInt() and 0xFF
+            val b9 = bytes[9].toInt() and 0xFF
+            val validSynchsafe = (b6 and 0x80) == 0 && (b7 and 0x80) == 0 &&
+                (b8 and 0x80) == 0 && (b9 and 0x80) == 0
+            if (!validSynchsafe) return null
+
+            val tagSize = ((b6 and 0x7F) shl 21) or
+                ((b7 and 0x7F) shl 14) or
+                ((b8 and 0x7F) shl 7) or
+                (b9 and 0x7F)
+            val footerSize = if (majorVersion >= 4 && (flags and 0x10) != 0) 10L else 0L
+            return Id3v2HeaderInfo(audioOffset = 10L + tagSize + footerSize)
+        }
+
+        private fun isValidMpegLayer3FrameHeader(b0: Int, b1: Int, b2: Int): Boolean {
+            if (b0 != 0xFF || (b1 and 0xE0) != 0xE0) return false
+            val mpegVersionBits = (b1 ushr 3) and 0x03
+            val layerBits = (b1 ushr 1) and 0x03
+            val bitrateIndex = (b2 ushr 4) and 0x0F
+            val sampleRateIndex = (b2 ushr 2) and 0x03
+            return mpegVersionBits != 0x01 &&
+                layerBits == 0x01 && // MPEG Layer III (MP3)
+                bitrateIndex in 1..14 && // Reject free (0) & invalid (15)
+                sampleRateIndex in 0..2 // Reject reserved (3)
+        }
+
+        private fun findValidMpegFrameOffset(bytes: ByteArray, startIndex: Int, length: Int): Int {
+            if (startIndex < 0 || length - startIndex < 4) return -1
+            val searchLimit = minOf(length - 4, startIndex + MAX_MPEG_SYNC_SEARCH_BYTES)
+            for (i in startIndex..searchLimit) {
+                val b0 = bytes[i].toInt() and 0xFF
+                val b1 = bytes[i + 1].toInt() and 0xFF
+                val b2 = bytes[i + 2].toInt() and 0xFF
+                if (isValidMpegLayer3FrameHeader(b0, b1, b2)) {
+                    return i
+                }
+            }
+            return -1
+        }
+
         /**
-         * Verifies that a downloaded file is a non-empty valid MP3 audio file (ID3v2 header or MPEG audio frame sync)
-         * and not an HTML/JSON error payload.
+         * Verifies that a downloaded file is a non-empty valid MP3 audio file:
+         * - When ID3v2 is present, parses tag size, seeks to audio data offset, and verifies a valid MPEG Layer III frame header.
+         * - When ID3v2 is absent, scans initial bytes for a valid MPEG Layer III frame header.
+         * - Rejects HTML/JSON/XML error payloads and ID3-only fakes lacking audio frames.
          */
         internal fun isValidMp3File(file: File): Boolean {
             if (!file.exists() || !file.isFile || file.length() < MIN_VALID_AUDIO_BYTES) {
                 return false
             }
             return try {
-                val sampleSize = minOf(file.length(), 16_384L).toInt()
-                val header = ByteArray(sampleSize)
+                val fileLength = file.length()
+                val initialSampleSize = minOf(fileLength, MAX_MPEG_SYNC_SEARCH_BYTES.toLong()).toInt()
+                val initialBuffer = ByteArray(initialSampleSize)
+                var initialRead = 0
                 FileInputStream(file).use { fis ->
-                    var offset = 0
-                    while (offset < sampleSize) {
-                        val read = fis.read(header, offset, sampleSize - offset)
+                    while (initialRead < initialSampleSize) {
+                        val read = fis.read(initialBuffer, initialRead, initialSampleSize - initialRead)
                         if (read == -1) break
-                        offset += read
+                        initialRead += read
                     }
-                    hasValidMp3HeaderBytes(header, offset, totalFileSize = file.length())
                 }
+                if (initialRead < 4 || isNonAudioTextPrefix(initialBuffer, initialRead)) {
+                    return false
+                }
+
+                if (initialBuffer[0] == 0x49.toByte() &&
+                    initialBuffer[1] == 0x44.toByte() &&
+                    initialBuffer[2] == 0x33.toByte()
+                ) {
+                    val id3 = parseId3v2Header(initialBuffer, initialRead) ?: return false
+                    if (fileLength < id3.audioOffset + 4L) return false
+                    if (id3.audioOffset + MAX_MPEG_SYNC_SEARCH_BYTES <= initialRead) {
+                        return findValidMpegFrameOffset(initialBuffer, id3.audioOffset.toInt(), initialRead) >= 0
+                    }
+                    // Large ID3v2 tag (e.g. embedded cover art): seek directly to audioOffset
+                    val remaining = (fileLength - id3.audioOffset).coerceAtMost(MAX_MPEG_SYNC_SEARCH_BYTES.toLong()).toInt()
+                    val postId3Buffer = ByteArray(remaining)
+                    var postRead = 0
+                    RandomAccessFile(file, "r").use { raf ->
+                        raf.seek(id3.audioOffset)
+                        while (postRead < remaining) {
+                            val read = raf.read(postId3Buffer, postRead, remaining - postRead)
+                            if (read == -1) break
+                            postRead += read
+                        }
+                    }
+                    return findValidMpegFrameOffset(postId3Buffer, 0, postRead) >= 0
+                }
+
+                findValidMpegFrameOffset(initialBuffer, 0, initialRead) >= 0
             } catch (_: Exception) {
                 false
             }
@@ -601,54 +771,16 @@ class DownloadManager(private val context: Context) {
             length: Int = bytes.size,
             totalFileSize: Long = length.toLong()
         ): Boolean {
-            if (length < 4) return false
+            if (length < 4 || isNonAudioTextPrefix(bytes, length)) return false
 
-            // Check ASCII text error responses (<html, <!doc, {...)
-            val prefix = String(bytes, 0, minOf(length, 32), Charsets.UTF_8).trimStart().lowercase(Locale.US)
-            if (prefix.startsWith("<html") || prefix.startsWith("<!doc") || prefix.startsWith("<?xml") || prefix.startsWith("{")) {
-                return false
-            }
-
-            // Standard ID3v2 header: "ID3" + version (2..4) + flags + synchsafe 28-bit size
             if (bytes[0] == 0x49.toByte() && bytes[1] == 0x44.toByte() && bytes[2] == 0x33.toByte()) {
-                if (length >= 10) {
-                    val majorVersion = bytes[3].toInt() and 0xFF
-                    val b6 = bytes[6].toInt() and 0xFF
-                    val b7 = bytes[7].toInt() and 0xFF
-                    val b8 = bytes[8].toInt() and 0xFF
-                    val b9 = bytes[9].toInt() and 0xFF
-                    val validSynchsafe = (b6 and 0x80) == 0 && (b7 and 0x80) == 0 &&
-                        (b8 and 0x80) == 0 && (b9 and 0x80) == 0
-                    if (majorVersion in 2..4 && validSynchsafe) {
-                        val tagSize = ((b6 and 0x7F) shl 21) or
-                            ((b7 and 0x7F) shl 14) or
-                            ((b8 and 0x7F) shl 7) or
-                            (b9 and 0x7F)
-                        // Ensure audio data exists beyond the ID3 header when full file length is known
-                        return totalFileSize >= 10L + tagSize + 4L || length < 10
-                    }
-                    return false
-                }
-                return true
+                val id3 = parseId3v2Header(bytes, length) ?: return false
+                if (totalFileSize < id3.audioOffset + 4L) return false
+                if (id3.audioOffset >= length.toLong()) return false
+                return findValidMpegFrameOffset(bytes, id3.audioOffset.toInt(), length) >= 0
             }
 
-            // Scan initial bytes for valid MPEG-1/2 Layer III frame sync (11 set bits: 0xFF 0xE0+)
-            val limit = length - 3
-            for (i in 0..limit) {
-                val b0 = bytes[i].toInt() and 0xFF
-                val b1 = bytes[i + 1].toInt() and 0xFF
-                val b2 = bytes[i + 2].toInt() and 0xFF
-                if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) {
-                    val mpegVersionBits = (b1 ushr 3) and 0x03
-                    val layerBits = (b1 ushr 1) and 0x03
-                    val bitrateIndex = (b2 ushr 4) and 0x0F
-                    val sampleRateIndex = (b2 ushr 2) and 0x03
-                    if (mpegVersionBits != 0x01 && layerBits != 0x00 && bitrateIndex != 0x0F && sampleRateIndex != 0x03) {
-                        return true
-                    }
-                }
-            }
-            return false
+            return findValidMpegFrameOffset(bytes, 0, length) >= 0
         }
     }
 }

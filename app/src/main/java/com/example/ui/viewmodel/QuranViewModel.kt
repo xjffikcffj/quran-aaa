@@ -2,6 +2,8 @@ package com.example.ui.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
+import androidx.annotation.VisibleForTesting
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
@@ -40,6 +42,9 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
     private val downloadManager = DownloadManager.getInstance(application)
     private val prefs = application.getSharedPreferences("quran_prefs", Context.MODE_PRIVATE)
     private val playerPrefs = application.getSharedPreferences("quran_player_prefs", Context.MODE_PRIVATE)
+
+    @VisibleForTesting
+    internal var playerPrefsCommitterForTest: ((SharedPreferences.Editor) -> Boolean)? = null
 
     val playerState: StateFlow<PlayerState> = playerManager.playerState
 
@@ -671,7 +676,11 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 7. All validation passed! Apply DB changes atomically in a single Room transaction
+            // 7. All validation passed! Snapshot prior Room rows for compensating rollback if SharedPreferences.commit() fails
+            val insertedBookmarkIds = mutableListOf<Long>()
+            val insertedReciterIds = mutableListOf<String>()
+            val previousSurahStates = mutableMapOf<Int, SurahStateEntity?>()
+
             db.withTransaction {
                 val existingBookmarks = db.bookmarkDao().getAllBookmarksOnce()
                 parsedBookmarks.forEach { incoming ->
@@ -682,12 +691,14 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
                             it.note == incoming.note
                     }
                     if (!alreadyExists) {
-                        db.bookmarkDao().insertBookmark(incoming)
+                        val newId = db.bookmarkDao().insertBookmark(incoming)
+                        insertedBookmarkIds.add(newId)
                     }
                 }
 
                 parsedRecitersToInsert.forEach { reciter ->
                     db.reciterDao().insertReciter(reciter)
+                    insertedReciterIds.add(reciter.id)
                 }
 
                 // Merge SurahStates & Favorites without deleting existing user favorites/progress
@@ -695,6 +706,7 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
                 val stateMap = parsedStates.associateBy { it.surahNumber }
                 for (surahNum in mergedSurahNumbers) {
                     val existing = db.surahStateDao().getState(surahNum)
+                    previousSurahStates[surahNum] = existing
                     val incoming = stateMap[surahNum]
                     val mergedFav = (existing?.isFavorite == true) ||
                         (incoming?.isFavorite == true) ||
@@ -715,7 +727,7 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 8. Apply SharedPreferences updates ONLY after DB transaction succeeded
+            // 8. Apply SharedPreferences updates ONLY after DB transaction succeeded, and verify commit() result
             val hasPrefUpdates = parsedPositions.isNotEmpty() ||
                 validatedRepeatMode != null ||
                 validatedPlaybackSpeed != null ||
@@ -750,7 +762,42 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
                         editor.remove("saved_custom_reciter_json")
                     }
                 }
-                editor.commit()
+
+                val committed = try {
+                    playerPrefsCommitterForTest?.invoke(editor) ?: editor.commit()
+                } catch (_: Exception) {
+                    false
+                }
+
+                if (!committed) {
+                    // Compensating rollback in Room so DB and SharedPreferences remain consistent
+                    try {
+                        db.withTransaction {
+                            insertedBookmarkIds.forEach { id ->
+                                db.bookmarkDao().deleteById(id)
+                            }
+                            insertedReciterIds.forEach { id ->
+                                db.reciterDao().deleteCustomReciter(id)
+                            }
+                            previousSurahStates.forEach { (surahNum, previousState) ->
+                                if (previousState != null) {
+                                    db.surahStateDao().insertOrUpdate(previousState)
+                                } else {
+                                    db.surahStateDao().deleteBySurahNumber(surahNum)
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {
+                        return@withContext BackupImportResult(
+                            false,
+                            "فشل حفظ إعدادات المشغل وتعذر إكمال التراجع عن تغييرات قاعدة البيانات."
+                        )
+                    }
+                    return@withContext BackupImportResult(
+                        false,
+                        "تعذر حفظ إعدادات المشغل (SharedPreferences)، وتم التراجع عن تغييرات الاستيراد للحفاظ على اتساق البيانات."
+                    )
+                }
             }
 
             playerManager.reloadPersistedStateIfIdle()

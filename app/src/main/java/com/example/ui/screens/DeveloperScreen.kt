@@ -541,8 +541,12 @@ fun DeveloperScreen(
     if (showAddReciterDialog) {
         AddCustomReciterDialog(
             onAdd = { name, url, count ->
-                viewModel.addCustomReciter(name, url, count)
-                Toast.makeText(context, "تمت إضافة القارئ $name بنجاح", Toast.LENGTH_SHORT).show()
+                val added = viewModel.addCustomReciter(name, url, count)
+                if (added) {
+                    Toast.makeText(context, "تمت إضافة القارئ $name بنجاح", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "تعذر الإضافة: يجب استخدام رابط HTTPS صالح", Toast.LENGTH_LONG).show()
+                }
             },
             onDismiss = { showAddReciterDialog = false }
         )

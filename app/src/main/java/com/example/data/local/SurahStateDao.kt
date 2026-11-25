@@ -32,4 +32,7 @@ interface SurahStateDao {
 
     @Query("UPDATE surah_states SET lastPositionMs = :positionMs, lastPlayedTimestamp = :timestamp WHERE surahNumber = :surahNumber")
     suspend fun updateLastPosition(surahNumber: Int, positionMs: Long, timestamp: Long = System.currentTimeMillis())
+
+    @Query("DELETE FROM surah_states WHERE surahNumber = :surahNumber")
+    suspend fun deleteBySurahNumber(surahNumber: Int)
 }

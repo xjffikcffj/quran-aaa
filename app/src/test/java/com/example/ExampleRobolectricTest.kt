@@ -905,5 +905,216 @@ class ExampleRobolectricTest {
       org.junit.Assert.assertFalse(com.example.QuranApp.database.surahStateDao().getState(101)?.isFavorite == true)
     }
   }
+
+  @Test
+  fun `verify DownloadManager prevents deletion race with newer task and deletes cleanly during active download`() {
+    kotlinx.coroutines.runBlocking {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      val dm = com.example.download.DownloadManager.getInstance(context)
+      val dao = com.example.QuranApp.database.downloadDao()
+      val reciter = com.example.data.DefaultReciters.getReciterById("afs")
+      val surah7 = com.example.data.QuranData.getSurahById(7)!!
+      val surah8 = com.example.data.QuranData.getSurahById(8)!!
+
+      val validMp3Bytes = ByteArray(24_576) { idx ->
+        when (idx) {
+          0 -> 0x49
+          1 -> 0x44
+          2 -> 0x33
+          3 -> 0x03
+          in 4..9 -> 0x00
+          10 -> 0xFF.toByte()
+          11 -> 0xFB.toByte()
+          12 -> 0x90.toByte()
+          else -> 0x55
+        }
+      }
+
+      // Scenario A: start download -> deleteDownload/cancelDownload -> immediately start newer download -> newer task completes and stays intact
+      val firstGate = java.util.concurrent.CountDownLatch(1)
+      var requestCounter = 0
+      val raceClient = okhttp3.OkHttpClient.Builder()
+        .addInterceptor { chain ->
+          val index = ++requestCounter
+          if (index == 1) {
+            firstGate.await(1500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            okhttp3.Response.Builder()
+              .request(chain.request())
+              .protocol(okhttp3.Protocol.HTTP_1_1)
+              .code(500)
+              .message("Old Cancelled Task")
+              .body(okhttp3.ResponseBody.create(null, ByteArray(0)))
+              .build()
+          } else {
+            okhttp3.Response.Builder()
+              .request(chain.request())
+              .protocol(okhttp3.Protocol.HTTP_1_1)
+              .code(200)
+              .message("OK")
+              .header("Content-Type", "audio/mpeg")
+              .header("Content-Length", validMp3Bytes.size.toString())
+              .body(okhttp3.ResponseBody.create(null, validMp3Bytes))
+              .build()
+          }
+        }
+        .build()
+
+      dm.httpClientOverride = raceClient
+      dm.retryBaseDelayMs = 10L
+      try {
+        dm.getLocalAudioFile(reciter.id, 7).delete()
+        dm.startDownload(reciter, surah7)
+        dm.deleteDownload("${reciter.id}_7")
+        // Immediately start newer download for the same surah before stale delete cleanup can finish
+        dm.startDownload(reciter, surah7)
+        firstGate.countDown()
+
+        val deadline = System.currentTimeMillis() + 4000L
+        while (System.currentTimeMillis() < deadline) {
+          val row = dao.getDownloadById("${reciter.id}_7")
+          if (row?.status == com.example.model.DownloadStatus.COMPLETED.name) break
+          kotlinx.coroutines.delay(30L)
+        }
+        // Wait extra time so any late stale delete coroutine would have run
+        kotlinx.coroutines.delay(250L)
+
+        val completedRow = dao.getDownloadById("${reciter.id}_7")
+        assertEquals(com.example.model.DownloadStatus.COMPLETED.name, completedRow?.status)
+        org.junit.Assert.assertTrue(dm.isDownloaded(reciter.id, 7))
+        assertEquals(validMp3Bytes.size.toLong(), dm.getLocalAudioFile(reciter.id, 7).length())
+
+        // Subsequent failed attempt when valid file already exists must preserve the valid completed file
+        dm.httpClientOverride = okhttp3.OkHttpClient.Builder()
+          .addInterceptor { chain ->
+            okhttp3.Response.Builder()
+              .request(chain.request())
+              .protocol(okhttp3.Protocol.HTTP_1_1)
+              .code(500)
+              .message("Server Error")
+              .body(okhttp3.ResponseBody.create(null, ByteArray(0)))
+              .build()
+          }
+          .build()
+        dm.startDownload(reciter, surah7)
+        kotlinx.coroutines.delay(150L)
+        org.junit.Assert.assertTrue(dm.isDownloaded(reciter.id, 7))
+        assertEquals(validMp3Bytes.size.toLong(), dm.getLocalAudioFile(reciter.id, 7).length())
+        assertEquals(com.example.model.DownloadStatus.COMPLETED.name, dao.getDownloadById("${reciter.id}_7")?.status)
+
+        // Scenario B: deleteDownload while an active download task is in progress (DOWNLOADING)
+        val activeGate = java.util.concurrent.CountDownLatch(1)
+        val activeStarted = java.util.concurrent.CountDownLatch(1)
+        dm.httpClientOverride = okhttp3.OkHttpClient.Builder()
+          .addInterceptor { chain ->
+            activeStarted.countDown()
+            activeGate.await(1500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            okhttp3.Response.Builder()
+              .request(chain.request())
+              .protocol(okhttp3.Protocol.HTTP_1_1)
+              .code(200)
+              .message("OK")
+              .header("Content-Type", "audio/mpeg")
+              .header("Content-Length", validMp3Bytes.size.toString())
+              .body(okhttp3.ResponseBody.create(null, validMp3Bytes))
+              .build()
+          }
+          .build()
+
+        dm.getLocalAudioFile(reciter.id, 8).delete()
+        dm.startDownload(reciter, surah8)
+        activeStarted.await(1500, java.util.concurrent.TimeUnit.MILLISECONDS)
+        kotlinx.coroutines.delay(30L)
+        dm.deleteDownload("${reciter.id}_8")
+        activeGate.countDown()
+        kotlinx.coroutines.delay(250L)
+
+        org.junit.Assert.assertFalse(dm.isDownloaded(reciter.id, 8))
+        org.junit.Assert.assertFalse(dm.getLocalAudioFile(reciter.id, 8).exists())
+        org.junit.Assert.assertNull(dao.getDownloadById("${reciter.id}_8"))
+      } finally {
+        dm.deleteDownload("${reciter.id}_7")
+        dm.deleteDownload("${reciter.id}_8")
+        kotlinx.coroutines.delay(100L)
+        dm.httpClientOverride = null
+        dm.retryBaseDelayMs = 750L
+      }
+    }
+  }
+
+  @Test
+  fun `verify backup import rolls back Room changes when SharedPreferences commit fails`() {
+    kotlinx.coroutines.runBlocking {
+      val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+      val viewModel = com.example.ui.viewmodel.QuranViewModel(app)
+      val db = com.example.QuranApp.database
+      val playerPrefs = app.getSharedPreferences("quran_player_prefs", Context.MODE_PRIVATE)
+
+      // Seed baseline state
+      db.surahStateDao().insertOrUpdate(com.example.data.local.SurahStateEntity(surahNumber = 18, lastPositionMs = 5000L, isFavorite = true))
+      playerPrefs.edit()
+        .putString("saved_reciter_id", "afs")
+        .putInt("last_surah_id", 18)
+        .putString("saved_repeat_mode", com.example.model.RepeatMode.ALL.name)
+        .putFloat("saved_playback_speed", 1.0f)
+        .commit()
+
+      val baselineBookmarkCount = db.bookmarkDao().getAllBookmarksOnce().size
+
+      val backupJson = """
+        {
+          "version": 2,
+          "bookmarks": [
+            {
+              "surahNumber": 44,
+              "surahName": "الدخان",
+              "reciterId": "custom_rollback_test",
+              "reciterName": "قارئ تراجع الاختبار",
+              "positionMs": 15000,
+              "note": "علامة يجب التراجع عنها",
+              "timestamp": 7777777
+            }
+          ],
+          "favorites": [44],
+          "customReciters": [
+            {
+              "id": "custom_rollback_test",
+              "name": "قارئ تراجع الاختبار",
+              "serverUrl": "https://rollback.example.com/audio/",
+              "availableSurahsCount": 114
+            }
+          ],
+          "playerSettings": {
+            "savedReciterId": "custom_rollback_test",
+            "lastSurahId": 44,
+            "savedRepeatMode": "ONE",
+            "savedPlaybackSpeed": 1.5
+          }
+        }
+      """.trimIndent()
+
+      // Simulate SharedPreferences.commit() failure
+      viewModel.playerPrefsCommitterForTest = { false }
+      try {
+        val result = viewModel.importBackupJsonWithResult(backupJson)
+        org.junit.Assert.assertFalse(result.success)
+
+        // Room changes MUST be rolled back completely
+        assertEquals(baselineBookmarkCount, db.bookmarkDao().getAllBookmarksOnce().size)
+        org.junit.Assert.assertFalse(db.bookmarkDao().getAllBookmarksOnce().any { it.note == "علامة يجب التراجع عنها" })
+        org.junit.Assert.assertNull(db.reciterDao().getReciterById("custom_rollback_test"))
+        org.junit.Assert.assertNull(db.surahStateDao().getState(44))
+
+        // Baseline Room and SharedPreferences data MUST remain intact
+        org.junit.Assert.assertTrue(db.surahStateDao().getState(18)?.isFavorite == true)
+        assertEquals(5000L, db.surahStateDao().getState(18)?.lastPositionMs)
+        assertEquals("afs", playerPrefs.getString("saved_reciter_id", ""))
+        assertEquals(18, playerPrefs.getInt("last_surah_id", 0))
+        assertEquals(com.example.model.RepeatMode.ALL.name, playerPrefs.getString("saved_repeat_mode", ""))
+        assertEquals(1.0f, playerPrefs.getFloat("saved_playback_speed", 0f), 0.001f)
+      } finally {
+        viewModel.playerPrefsCommitterForTest = null
+      }
+    }
+  }
 }
 
