@@ -109,14 +109,13 @@ fun DeveloperScreen(
             coroutineScope.launch {
                 try {
                     val json = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
-                    val success = viewModel.importBackupJson(json)
-                    importFeedback = if (success) {
-                        Toast.makeText(context, "تمت استعادة البيانات من الملف بنجاح", Toast.LENGTH_SHORT).show()
-                        true to "تمت استعادة المفضلة والإشارات ومواضع القراءة بنجاح."
-                    } else {
-                        Toast.makeText(context, "ملف النسخة غير صالح أو تالف", Toast.LENGTH_LONG).show()
-                        false to "ملف النسخة غير صالح أو يفتقد الحقول المطلوبة."
-                    }
+                    val result = viewModel.importBackupJsonWithResult(json)
+                    importFeedback = result.success to result.message
+                    Toast.makeText(
+                        context,
+                        result.message,
+                        if (result.success) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+                    ).show()
                 } catch (e: Exception) {
                     importFeedback = false to "تعذر قراءة الملف المحدد."
                 }
@@ -439,15 +438,16 @@ fun DeveloperScreen(
                         Button(
                             onClick = {
                                 coroutineScope.launch {
-                                    val success = viewModel.importBackupJson(importJsonText)
-                                    if (success) {
-                                        importFeedback = true to "تمت استعادة البيانات بنجاح."
-                                        Toast.makeText(context, "تمت استعادة البيانات بنجاح", Toast.LENGTH_SHORT).show()
+                                    val result = viewModel.importBackupJsonWithResult(importJsonText)
+                                    importFeedback = result.success to result.message
+                                    Toast.makeText(
+                                        context,
+                                        result.message,
+                                        if (result.success) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+                                    ).show()
+                                    if (result.success) {
                                         showImportField = false
                                         importJsonText = ""
-                                    } else {
-                                        importFeedback = false to "فشل استيراد النسخة: تنسيق JSON أو الحقول غير صالحة."
-                                        Toast.makeText(context, "فشل استيراد النسخة: تنسيق JSON غير صالح", Toast.LENGTH_LONG).show()
                                     }
                                 }
                             },

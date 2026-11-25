@@ -89,14 +89,26 @@ class DownloadManager(private val context: Context) {
         }
     }
 
+    @androidx.annotation.VisibleForTesting
+    internal var httpClientOverride: OkHttpClient? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal var retryBaseDelayMs: Long = 750L
+
+    private fun activeClient(): OkHttpClient = httpClientOverride ?: okHttpClient
+
     fun getLocalAudioFile(reciterId: String, surahNumber: Int): File {
         val padded = String.format(Locale.US, "%03d", surahNumber)
         return File(downloadsDir, "quran_${reciterId}_${padded}.mp3")
     }
 
-    fun isDownloaded(reciterId: String, surahNumber: Int): Boolean {
+    fun getValidLocalAudioFile(reciterId: String, surahNumber: Int): File? {
         val file = getLocalAudioFile(reciterId, surahNumber)
-        return file.exists() && file.length() >= MIN_VALID_AUDIO_BYTES
+        return if (isValidMp3File(file)) file else null
+    }
+
+    fun isDownloaded(reciterId: String, surahNumber: Int): Boolean {
+        return getValidLocalAudioFile(reciterId, surahNumber) != null
     }
 
     fun getAllDownloads(): Flow<List<DownloadItem>> {
@@ -301,7 +313,7 @@ class DownloadManager(private val context: Context) {
                     requestBuilder.header("Range", "bytes=$existingBytes-")
                 }
 
-                val call = okHttpClient.newCall(requestBuilder.build())
+                val call = activeClient().newCall(requestBuilder.build())
                 taskHolder.call = call
 
                 call.execute().use { response ->
@@ -324,15 +336,42 @@ class DownloadManager(private val context: Context) {
 
                     val body = response.body ?: throw IOException("استجابة الخادم فارغة")
                     val isPartial = response.code == 206
-                    val appendMode = isPartial && existingBytes > 0L
-                    if (!isPartial && tempFile.exists()) {
-                        tempFile.delete()
+                    val contentRangeHeader = response.header("Content-Range")
+                    val rangeSpec = if (isPartial) parseContentRange(contentRangeHeader) else null
+
+                    val appendMode: Boolean
+                    val baseOffset: Long
+                    if (isPartial && existingBytes > 0L) {
+                        when {
+                            rangeSpec != null && rangeSpec.start == existingBytes -> {
+                                appendMode = true
+                                baseOffset = existingBytes
+                            }
+                            rangeSpec != null && rangeSpec.start == 0L -> {
+                                // Server returned partial bytes starting from 0 instead of requested offset
+                                if (tempFile.exists()) tempFile.delete()
+                                appendMode = false
+                                baseOffset = 0L
+                            }
+                            else -> {
+                                // Mismatched or missing Content-Range: discard partial temp file and restart from byte 0
+                                if (tempFile.exists()) tempFile.delete()
+                                throw IOException(
+                                    "تعارض في نطاق الاستئناف (متوقع $existingBytes، المستلم ${rangeSpec?.start})"
+                                )
+                            }
+                        }
+                    } else {
+                        if (tempFile.exists()) {
+                            tempFile.delete()
+                        }
+                        appendMode = false
+                        baseOffset = 0L
                     }
 
-                    val baseOffset = if (appendMode) existingBytes else 0L
                     val bodyLength = body.contentLength()
                     val totalBytes = when {
-                        isPartial -> parseTotalFromContentRange(response.header("Content-Range"))
+                        isPartial -> rangeSpec?.total
                             ?: if (bodyLength > 0L) baseOffset + bodyLength else -1L
                         else -> bodyLength
                     }
@@ -397,7 +436,7 @@ class DownloadManager(private val context: Context) {
                 }
                 attempt++
                 if (attempt < maxAttempts && isCurrentTask()) {
-                    delay(750L * attempt)
+                    delay(retryBaseDelayMs * attempt)
                 }
             } finally {
                 taskHolder.call = null
@@ -421,7 +460,7 @@ class DownloadManager(private val context: Context) {
                 .url("https://archive.org/metadata/$identifier")
                 .header("User-Agent", DEFAULT_USER_AGENT)
                 .build()
-            val call = okHttpClient.newCall(metadataReq)
+            val call = activeClient().newCall(metadataReq)
             taskHolder.call = call
             call.execute().use { resp ->
                 if (!resp.isSuccessful) return emptyList()
@@ -452,13 +491,6 @@ class DownloadManager(private val context: Context) {
         }
     }
 
-    private fun parseTotalFromContentRange(contentRange: String?): Long? {
-        if (contentRange.isNullOrBlank()) return null
-        val slashIndex = contentRange.lastIndexOf('/')
-        if (slashIndex == -1 || slashIndex == contentRange.lastIndex) return null
-        return contentRange.substring(slashIndex + 1).trim().toLongOrNull()
-    }
-
     private fun mapDownloadErrorMessage(e: Exception): String {
         val msg = e.localizedMessage ?: ""
         return when {
@@ -476,9 +508,10 @@ class DownloadManager(private val context: Context) {
         task?.call?.cancel()
         task?.job?.cancel()
         scope.launch {
+            if (activeTasks.containsKey(downloadId)) return@launch
             val file = parseDownloadIdToFile(downloadId)
-            val hadValidFile = file != null && file.exists() && isValidMp3File(file)
-            if (!hadValidFile) {
+            val hadValidFile = file != null && isValidMp3File(file)
+            if (!hadValidFile && !activeTasks.containsKey(downloadId)) {
                 QuranApp.database.downloadDao().deleteById(downloadId)
             }
         }
@@ -520,6 +553,24 @@ class DownloadManager(private val context: Context) {
             }
         }
 
+        internal data class ContentRangeSpec(
+            val start: Long,
+            val end: Long?,
+            val total: Long?
+        )
+
+        private val CONTENT_RANGE_REGEX =
+            Regex("^bytes\\s+(\\d+)-(\\d+|\\*)/(\\d+|\\*)$", RegexOption.IGNORE_CASE)
+
+        internal fun parseContentRange(contentRange: String?): ContentRangeSpec? {
+            if (contentRange.isNullOrBlank()) return null
+            val match = CONTENT_RANGE_REGEX.matchEntire(contentRange.trim()) ?: return null
+            val start = match.groupValues[1].toLongOrNull() ?: return null
+            val end = match.groupValues[2].toLongOrNull()
+            val total = match.groupValues[3].toLongOrNull()
+            return ContentRangeSpec(start = start, end = end, total = total)
+        }
+
         /**
          * Verifies that a downloaded file is a non-empty valid MP3 audio file (ID3v2 header or MPEG audio frame sync)
          * and not an HTML/JSON error payload.
@@ -538,14 +589,18 @@ class DownloadManager(private val context: Context) {
                         if (read == -1) break
                         offset += read
                     }
-                    hasValidMp3HeaderBytes(header, offset)
+                    hasValidMp3HeaderBytes(header, offset, totalFileSize = file.length())
                 }
             } catch (_: Exception) {
                 false
             }
         }
 
-        internal fun hasValidMp3HeaderBytes(bytes: ByteArray, length: Int = bytes.size): Boolean {
+        internal fun hasValidMp3HeaderBytes(
+            bytes: ByteArray,
+            length: Int = bytes.size,
+            totalFileSize: Long = length.toLong()
+        ): Boolean {
             if (length < 4) return false
 
             // Check ASCII text error responses (<html, <!doc, {...)
@@ -554,8 +609,26 @@ class DownloadManager(private val context: Context) {
                 return false
             }
 
-            // Standard ID3v2 header: "ID3"
+            // Standard ID3v2 header: "ID3" + version (2..4) + flags + synchsafe 28-bit size
             if (bytes[0] == 0x49.toByte() && bytes[1] == 0x44.toByte() && bytes[2] == 0x33.toByte()) {
+                if (length >= 10) {
+                    val majorVersion = bytes[3].toInt() and 0xFF
+                    val b6 = bytes[6].toInt() and 0xFF
+                    val b7 = bytes[7].toInt() and 0xFF
+                    val b8 = bytes[8].toInt() and 0xFF
+                    val b9 = bytes[9].toInt() and 0xFF
+                    val validSynchsafe = (b6 and 0x80) == 0 && (b7 and 0x80) == 0 &&
+                        (b8 and 0x80) == 0 && (b9 and 0x80) == 0
+                    if (majorVersion in 2..4 && validSynchsafe) {
+                        val tagSize = ((b6 and 0x7F) shl 21) or
+                            ((b7 and 0x7F) shl 14) or
+                            ((b8 and 0x7F) shl 7) or
+                            (b9 and 0x7F)
+                        // Ensure audio data exists beyond the ID3 header when full file length is known
+                        return totalFileSize >= 10L + tagSize + 4L || length < 10
+                    }
+                    return false
+                }
                 return true
             }
 

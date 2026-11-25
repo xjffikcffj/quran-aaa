@@ -278,12 +278,55 @@ class ExampleUnitTest {
         val jsonPayload = "{\"error\":\"rate_limited\"}".toByteArray()
         assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(jsonPayload))
 
-        val id3Payload = byteArrayOf(0x49, 0x44, 0x33, 0x03, 0x00, 0x00)
+        val id3Payload = byteArrayOf(
+            0x49, 0x44, 0x33, 0x03, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x0A,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+            0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x00
+        )
         assertTrue(com.example.download.DownloadManager.hasValidMp3HeaderBytes(id3Payload))
+
+        // Corrupt ID3 payload claiming tag size larger than total file size must fail
+        val truncatedId3Payload = byteArrayOf(
+            0x49, 0x44, 0x33, 0x03, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00
+        )
+        assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(truncatedId3Payload))
+
+        // Zero-filled payload must fail
+        assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(ByteArray(64)))
 
         // Valid MPEG-1 Layer III frame header: 0xFF 0xFB 0x90 0x00
         val mpegSyncPayload = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x00)
         assertTrue(com.example.download.DownloadManager.hasValidMp3HeaderBytes(mpegSyncPayload))
+    }
+
+    @Test
+    fun testCustomReciterHttpsValidation() {
+        assertTrue(com.example.model.Reciter.isValidHttpsServerUrl("https://cdn.example.com/audio/"))
+        assertTrue(com.example.model.Reciter.isValidHttpsServerUrl("https://archive.org/download/mmmmmm002_20220618"))
+        assertFalse(com.example.model.Reciter.isValidHttpsServerUrl("http://cdn.example.com/audio/"))
+        assertFalse(com.example.model.Reciter.isValidHttpsServerUrl("ftp://cdn.example.com/audio/"))
+        assertFalse(com.example.model.Reciter.isValidHttpsServerUrl("https://"))
+        assertFalse(com.example.model.Reciter.isValidHttpsServerUrl("https://invalid host/audio/"))
+    }
+
+    @Test
+    fun testParseContentRangeHeader() {
+        val valid = com.example.download.DownloadManager.parseContentRange("bytes 1024-2047/4096")
+        assertNotNull(valid)
+        assertEquals(1024L, valid!!.start)
+        assertEquals(2047L, valid.end)
+        assertEquals(4096L, valid.total)
+
+        val unknownTotal = com.example.download.DownloadManager.parseContentRange("bytes 0-511/*")
+        assertNotNull(unknownTotal)
+        assertEquals(0L, unknownTotal!!.start)
+        assertEquals(null, unknownTotal.total)
+
+        assertEquals(null, com.example.download.DownloadManager.parseContentRange("items 0-10/20"))
+        assertEquals(null, com.example.download.DownloadManager.parseContentRange(null))
     }
 }
 

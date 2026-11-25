@@ -76,9 +76,23 @@ class PlayerManager private constructor(private val context: Context) {
     private var bufferingTimeoutJob: Job? = null
     private var reconnectJob: Job? = null
     private var isPrepared = false
-    private var hasRetriedReconnect = false
+    private var reconnectAttemptCount = 0
     private var lastPausedTimeMs: Long = 0L
     private var isNetworkLostDuringPlayback = false
+
+    @get:androidx.annotation.VisibleForTesting
+    internal val reconnectAttemptCountForTest: Int
+        get() = reconnectAttemptCount
+
+    @get:androidx.annotation.VisibleForTesting
+    internal val activeMediaPlayerForTest: MediaPlayer?
+        get() = mediaPlayer
+
+    @androidx.annotation.VisibleForTesting
+    internal var forceNetworkConnectedForTest: Boolean? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal var reconnectDelayMsForTest: Long = 500L
 
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
@@ -264,7 +278,31 @@ class PlayerManager private constructor(private val context: Context) {
         } catch (_: Exception) {}
     }
 
+    internal fun reloadPersistedStateIfIdle() {
+        val state = _playerState.value
+        if (state.isPlaying || state.isBuffering) return
+        val reciter = loadSavedReciterSync()
+        val savedSurahId = prefs.getInt("last_surah_id", 1)
+        val surah = QuranData.getSurahById(savedSurahId) ?: QuranData.allSurahs.first()
+        val savedPos = getSavedPosition(reciter.id, surah.id)
+        val savedDur = getSavedDuration(reciter.id, surah.id)
+        _playerState.update {
+            it.copy(
+                currentReciter = reciter,
+                currentSurah = surah,
+                currentPositionMs = savedPos,
+                totalDurationMs = savedDur,
+                repeatMode = loadSavedRepeatMode(),
+                playbackSpeed = loadSavedPlaybackSpeed(),
+                isPlaying = false,
+                isBuffering = false
+            )
+        }
+        restoreCustomReciterFromDatabaseIfNeeded(reciter.id, surah.id)
+    }
+
     private fun isNetworkConnected(): Boolean {
+        forceNetworkConnectedForTest?.let { return it }
         return try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
             val network = cm.activeNetwork ?: return false
@@ -483,11 +521,31 @@ class PlayerManager private constructor(private val context: Context) {
         startFromBeginning: Boolean = false,
         autoPlay: Boolean = true
     ) {
+        playSurahInternal(
+            surah = surah,
+            seekToMs = seekToMs,
+            startFromBeginning = startFromBeginning,
+            autoPlay = autoPlay,
+            isReconnectAttempt = false
+        )
+    }
+
+    private fun playSurahInternal(
+        surah: Surah,
+        seekToMs: Long?,
+        startFromBeginning: Boolean,
+        autoPlay: Boolean,
+        isReconnectAttempt: Boolean
+    ) {
         val reciter = _playerState.value.currentReciter ?: DefaultReciters.defaultReciter
         val requestId = playbackRequestId.incrementAndGet()
         reconnectJob?.cancel()
         prepareTimeoutJob?.cancel()
         bufferingTimeoutJob?.cancel()
+
+        if (!isReconnectAttempt) {
+            reconnectAttemptCount = 0
+        }
 
         if (!reciter.isSurahAvailable(surah.id)) {
             releaseMediaPlayer()
@@ -502,7 +560,6 @@ class PlayerManager private constructor(private val context: Context) {
         }
 
         releaseMediaPlayer()
-        hasRetriedReconnect = false
 
         val savedPos = getSavedPosition(reciter.id, surah.id)
         val savedDur = getSavedDuration(reciter.id, surah.id)
@@ -514,8 +571,8 @@ class PlayerManager private constructor(private val context: Context) {
         }
 
         val downloadManager = DownloadManager.getInstance(context)
-        val localFile = downloadManager.getLocalAudioFile(reciter.id, surah.id)
-        val isOffline = downloadManager.isDownloaded(reciter.id, surah.id)
+        val validLocalFile = downloadManager.getValidLocalAudioFile(reciter.id, surah.id)
+        val isOffline = validLocalFile != null
         val rawUrl = reciter.getAudioUrl(surah.id)
 
         _playerState.update {
@@ -543,12 +600,12 @@ class PlayerManager private constructor(private val context: Context) {
             return
         }
 
-        if (isOffline && localFile.exists() && localFile.length() > 0L) {
+        if (validLocalFile != null) {
             prepareMediaPlayer(
                 requestId = requestId,
                 surah = surah,
                 reciter = reciter,
-                localPath = localFile.absolutePath,
+                localPath = validLocalFile.absolutePath,
                 remoteUrl = null,
                 targetSeekMs = targetSeekMs,
                 savedDur = savedDur,
@@ -662,7 +719,6 @@ class PlayerManager private constructor(private val context: Context) {
                     prepareTimeoutJob?.cancel()
                     bufferingTimeoutJob?.cancel()
                     isPrepared = true
-                    hasRetriedReconnect = false
 
                     val duration = try {
                         val d = mp.duration.toLong()
@@ -761,13 +817,24 @@ class PlayerManager private constructor(private val context: Context) {
                     val lastPos = if (current != null) getSavedPosition(activeReciter.id, current.id) else _playerState.value.currentPositionMs
                     releaseMediaPlayer()
 
-                    if (!hasRetriedReconnect && current != null && isNetworkConnected()) {
-                        hasRetriedReconnect = true
+                    val resumeSeekMs = if (lastPos > 0L) lastPos else targetSeekMs
+                    if (localPath == null &&
+                        reconnectAttemptCount < MAX_RECONNECT_ATTEMPTS &&
+                        current != null &&
+                        isNetworkConnected()
+                    ) {
+                        reconnectAttemptCount++
                         reconnectJob?.cancel()
                         reconnectJob = scope.launch {
-                            delay(500L)
+                            delay(reconnectDelayMsForTest)
                             if (requestId == playbackRequestId.get()) {
-                                playSurah(current, seekToMs = lastPos, autoPlay = true)
+                                playSurahInternal(
+                                    surah = current,
+                                    seekToMs = resumeSeekMs,
+                                    startFromBeginning = false,
+                                    autoPlay = true,
+                                    isReconnectAttempt = true
+                                )
                             }
                         }
                         return@setOnErrorListener true
@@ -1199,6 +1266,7 @@ class PlayerManager private constructor(private val context: Context) {
 
     companion object {
         private const val PREPARE_TIMEOUT_MS = 20_000L
+        private const val MAX_RECONNECT_ATTEMPTS = 1
 
         @Volatile
         private var instance: PlayerManager? = null

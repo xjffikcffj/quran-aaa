@@ -239,21 +239,26 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
         FridayReminderReceiver.showFridayNotification(getApplication())
     }
 
-    fun addCustomReciter(name: String, serverUrl: String, availableCount: Int) {
+    fun addCustomReciter(name: String, serverUrl: String, availableCount: Int): Boolean {
+        val cleanName = name.trim()
+        val trimmedUrl = serverUrl.trim()
+        if (cleanName.isEmpty() || !Reciter.isValidHttpsServerUrl(trimmedUrl)) {
+            return false
+        }
+        val cleanUrl = Reciter.normalizeServerUrl(trimmedUrl)
+        val id = "custom_${System.currentTimeMillis()}"
+        val newReciter = Reciter(
+            id = id,
+            name = cleanName,
+            serverUrl = cleanUrl,
+            availableSurahsCount = availableCount.coerceIn(1, 114),
+            isCustom = true,
+            subInfo = "قارئ مخصص مضاف من لوحة المطور"
+        )
         viewModelScope.launch {
-            val trimmedUrl = serverUrl.trim()
-            val cleanUrl = if (trimmedUrl.endsWith("/")) trimmedUrl else "$trimmedUrl/"
-            val id = "custom_${System.currentTimeMillis()}"
-            val newReciter = Reciter(
-                id = id,
-                name = name.trim(),
-                serverUrl = cleanUrl,
-                availableSurahsCount = availableCount.coerceIn(1, 114),
-                isCustom = true,
-                subInfo = "قارئ مخصص مضاف من لوحة المطور"
-            )
             QuranApp.database.reciterDao().insertReciter(ReciterEntity.fromReciter(newReciter))
         }
+        return true
     }
 
     fun deleteCustomReciter(reciterId: String) {
@@ -344,107 +349,251 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
         root.toString(2)
     }
 
-    suspend fun importBackupJson(jsonString: String): Boolean = withContext(Dispatchers.IO) {
-        if (jsonString.isBlank()) return@withContext false
+    data class BackupImportResult(
+        val success: Boolean,
+        val message: String
+    )
+
+    suspend fun importBackupJson(jsonString: String): Boolean {
+        return importBackupJsonWithResult(jsonString).success
+    }
+
+    suspend fun importBackupJsonWithResult(jsonString: String): BackupImportResult = withContext(Dispatchers.IO) {
+        if (jsonString.isBlank()) {
+            return@withContext BackupImportResult(false, "محتوى النسخة الاحتياطية فارغ.")
+        }
 
         try {
             val root = JSONObject(jsonString.trim())
+            if (root.has("version")) {
+                val rawVersion = root.opt("version")
+                val versionNum = (rawVersion as? Number)?.toInt()
+                val isIntegral = rawVersion is Int || rawVersion is Long
+                if (!isIntegral || versionNum == null || versionNum !in 1..2) {
+                    return@withContext BackupImportResult(false, "إصدار النسخة الاحتياطية غير مدعوم.")
+                }
+            }
+
             val hasRecognizedSection = root.has("bookmarks") ||
                 root.has("customReciters") ||
                 root.has("favorites") ||
                 root.has("surahStates") ||
-                root.has("reciterPositions")
-            if (!hasRecognizedSection) return@withContext false
+                root.has("reciterPositions") ||
+                root.has("playerSettings")
+            if (!hasRecognizedSection) {
+                return@withContext BackupImportResult(false, "ملف JSON لا يحتوي على بيانات صالحة للتطبيق.")
+            }
 
-            // Pre-validate all sections before mutating DB or prefs
+            val db = QuranApp.database
+            val existingReciters = db.reciterDao().getAllRecitersOnce()
+            val existingCustomById = existingReciters.filter { it.isCustom }.associateBy { it.id }
+            val usedReciterIds = (existingReciters.map { it.id } + DefaultReciters.list.map { it.id }).toMutableSet()
+
+            // 1. Validate & resolve customReciters first (enforcing HTTPS only, duplicate/ID conflict checks)
+            val parsedRecitersToInsert = mutableListOf<ReciterEntity>()
+            val resolvedRecitersById = mutableMapOf<String, ReciterEntity>()
+            val idMapping = mutableMapOf<String, String>()
+            val batchSeenIds = mutableMapOf<String, Pair<String, String>>() // rawId -> (name, normalizedUrl)
+
+            if (root.has("customReciters")) {
+                val array = root.getJSONArray("customReciters")
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    val rawId = (obj.opt("id") as? String)?.trim().orEmpty()
+                    val name = (obj.opt("name") as? String)?.trim().orEmpty()
+                    val rawServerUrl = (obj.opt("serverUrl") as? String)?.trim().orEmpty()
+                    if (rawId.isEmpty() || name.isEmpty() || rawServerUrl.isEmpty()) {
+                        return@withContext BackupImportResult(false, "بيانات أحد القراء المخصصين ناقصة في النسخة الاحتياطية.")
+                    }
+                    if (!Reciter.isValidHttpsServerUrl(rawServerUrl)) {
+                        return@withContext BackupImportResult(
+                            false,
+                            "تم رفض الاستيراد: روابط القراء المخصصين يجب أن تستخدم بروتوكول HTTPS فقط."
+                        )
+                    }
+
+                    val rawCount = if (obj.has("availableSurahsCount")) obj.opt("availableSurahsCount") else 114
+                    val count = (rawCount as? Number)?.toInt()
+                    val isIntegralCount = rawCount is Int || rawCount is Long
+                    if (!isIntegralCount || count == null || count !in 1..114) {
+                        return@withContext BackupImportResult(false, "عدد السور لأحد القراء المخصصين غير صالح.")
+                    }
+
+                    val csv = (obj.opt("availableSurahsCsv") as? String)?.trim().orEmpty()
+                    if (csv.isNotEmpty()) {
+                        val tokens = csv.split(",")
+                        for (token in tokens) {
+                            val num = token.trim().toIntOrNull()
+                            if (num == null || num !in 1..114) {
+                                return@withContext BackupImportResult(false, "قائمة السور لأحد القراء المخصصين غير صالحة.")
+                            }
+                        }
+                    }
+
+                    val normalizedUrl = Reciter.normalizeServerUrl(rawServerUrl)
+                    val prevSameIdInBatch = batchSeenIds[rawId]
+                    if (prevSameIdInBatch != null) {
+                        if (prevSameIdInBatch.first == name && prevSameIdInBatch.second.equals(normalizedUrl, ignoreCase = true)) {
+                            // Identical duplicate entry in same JSON -> skip without failing
+                            continue
+                        } else {
+                            return@withContext BackupImportResult(
+                                false,
+                                "تم رفض الاستيراد: تعارض في معرّف القارئ المخصص ($rawId) داخل الملف."
+                            )
+                        }
+                    }
+                    batchSeenIds[rawId] = name to normalizedUrl
+
+                    // Check if identical custom reciter already exists in DB or in this batch
+                    val matchingExisting = existingCustomById.values.firstOrNull {
+                        it.name == name && it.serverUrl.equals(normalizedUrl, ignoreCase = true)
+                    }
+                    val matchingBatch = parsedRecitersToInsert.firstOrNull {
+                        it.name == name && it.serverUrl.equals(normalizedUrl, ignoreCase = true)
+                    }
+
+                    when {
+                        matchingExisting != null -> {
+                            idMapping[rawId] = matchingExisting.id
+                            resolvedRecitersById[matchingExisting.id] = matchingExisting
+                        }
+                        matchingBatch != null -> {
+                            idMapping[rawId] = matchingBatch.id
+                            resolvedRecitersById[matchingBatch.id] = matchingBatch
+                        }
+                        else -> {
+                            val resolvedId = if (!usedReciterIds.contains(rawId)) {
+                                rawId
+                            } else {
+                                var suffix = 1
+                                var candidate = "custom_${rawId}_$suffix"
+                                while (usedReciterIds.contains(candidate)) {
+                                    suffix++
+                                    candidate = "custom_${rawId}_$suffix"
+                                }
+                                candidate
+                            }
+                            usedReciterIds.add(resolvedId)
+                            idMapping[rawId] = resolvedId
+
+                            val entity = ReciterEntity(
+                                id = resolvedId,
+                                name = name,
+                                serverUrl = normalizedUrl,
+                                availableSurahsCount = count,
+                                availableSurahsCsv = csv,
+                                isCustom = true,
+                                subInfo = obj.optString("subInfo", "قارئ مخصص مستعاد من النسخة الاحتياطية")
+                                    .ifBlank { "قارئ مخصص مستعاد من النسخة الاحتياطية" }
+                            )
+                            parsedRecitersToInsert.add(entity)
+                            resolvedRecitersById[resolvedId] = entity
+                        }
+                    }
+                }
+            }
+
+            // 2. Validate bookmarks
             val parsedBookmarks = mutableListOf<BookmarkEntity>()
             if (root.has("bookmarks")) {
                 val array = root.getJSONArray("bookmarks")
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
-                    val surahNumber = obj.getInt("surahNumber")
-                    if (surahNumber !in 1..114) return@withContext false
-                    val positionMs = obj.getLong("positionMs").coerceAtLeast(0L)
-                    val reciterId = obj.getString("reciterId").trim()
-                    val reciterName = obj.getString("reciterName").trim()
-                    if (reciterId.isEmpty() || reciterName.isEmpty()) return@withContext false
-                    val surahName = obj.optString("surahName").ifBlank {
-                        QuranData.getSurahById(surahNumber)?.name ?: return@withContext false
+                    val rawSurah = obj.opt("surahNumber")
+                    val surahNumber = (rawSurah as? Number)?.toInt()
+                    if (!(rawSurah is Int || rawSurah is Long) || surahNumber == null || surahNumber !in 1..114) {
+                        return@withContext BackupImportResult(false, "رقم السورة في أحد الإشارات المرجعية غير صالح.")
                     }
+                    val rawPos = obj.opt("positionMs")
+                    val positionMs = (rawPos as? Number)?.toLong()
+                    if (rawPos !is Number || rawPos is Double || rawPos is Float || positionMs == null || positionMs < 0L) {
+                        return@withContext BackupImportResult(false, "موضع الإشارة المرجعية غير صالح.")
+                    }
+                    val rawReciterId = (obj.opt("reciterId") as? String)?.trim().orEmpty()
+                    val reciterName = (obj.opt("reciterName") as? String)?.trim().orEmpty()
+                    if (rawReciterId.isEmpty() || reciterName.isEmpty()) {
+                        return@withContext BackupImportResult(false, "بيانات القارئ في الإشارة المرجعية غير صالحة.")
+                    }
+                    val rawNote = if (obj.has("note")) obj.opt("note") else ""
+                    if (rawNote !is String) {
+                        return@withContext BackupImportResult(false, "ملاحظة الإشارة المرجعية غير صالحة.")
+                    }
+                    val rawTs = if (obj.has("timestamp")) obj.opt("timestamp") else System.currentTimeMillis()
+                    val timestamp = (rawTs as? Number)?.toLong()
+                    if (rawTs !is Number || timestamp == null || timestamp < 0L) {
+                        return@withContext BackupImportResult(false, "تاريخ الإشارة المرجعية غير صالح.")
+                    }
+                    val surahName = obj.optString("surahName").ifBlank {
+                        QuranData.getSurahById(surahNumber)?.name
+                            ?: return@withContext BackupImportResult(false, "اسم السورة غير صالح.")
+                    }
+                    val mappedReciterId = idMapping[rawReciterId] ?: rawReciterId
                     parsedBookmarks.add(
                         BookmarkEntity(
                             surahNumber = surahNumber,
                             surahName = surahName,
-                            reciterId = reciterId,
+                            reciterId = mappedReciterId,
                             reciterName = reciterName,
                             positionMs = positionMs,
-                            note = obj.optString("note", "").trim(),
-                            timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                            note = rawNote.trim(),
+                            timestamp = timestamp
                         )
                     )
                 }
             }
 
-            val parsedReciters = mutableListOf<ReciterEntity>()
-            if (root.has("customReciters")) {
-                val array = root.getJSONArray("customReciters")
-                for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    val rawId = obj.getString("id").trim()
-                    val name = obj.getString("name").trim()
-                    val serverUrl = obj.getString("serverUrl").trim()
-                    val count = obj.getInt("availableSurahsCount").coerceIn(1, 114)
-                    if (rawId.isEmpty() || name.isEmpty()) return@withContext false
-                    if (!serverUrl.startsWith("https://", ignoreCase = true) &&
-                        !serverUrl.startsWith("http://", ignoreCase = true)
-                    ) {
-                        return@withContext false
-                    }
-                    val safeId = if (DefaultReciters.list.any { it.id == rawId }) "custom_$rawId" else rawId
-                    val normalizedUrl = if (serverUrl.endsWith("/")) serverUrl else "$serverUrl/"
-                    parsedReciters.add(
-                        ReciterEntity(
-                            id = safeId,
-                            name = name,
-                            serverUrl = normalizedUrl,
-                            availableSurahsCount = count,
-                            availableSurahsCsv = obj.optString("availableSurahsCsv", ""),
-                            isCustom = true,
-                            subInfo = obj.optString("subInfo", "قارئ مخصص مستعاد من النسخة الاحتياطية")
-                                .ifBlank { "قارئ مخصص مستعاد من النسخة الاحتياطية" }
-                        )
-                    )
-                }
-            }
-
+            // 3. Validate favorites
             val parsedFavorites = mutableSetOf<Int>()
             if (root.has("favorites")) {
                 val favArray = root.getJSONArray("favorites")
                 for (i in 0 until favArray.length()) {
-                    val surahNum = favArray.getInt(i)
-                    if (surahNum !in 1..114) return@withContext false
+                    val rawNum = favArray.opt(i)
+                    val surahNum = (rawNum as? Number)?.toInt()
+                    if (!(rawNum is Int || rawNum is Long) || surahNum == null || surahNum !in 1..114) {
+                        return@withContext BackupImportResult(false, "قائمة المفضلة تحتوي على رقم سورة غير صالح.")
+                    }
                     parsedFavorites.add(surahNum)
                 }
             }
 
+            // 4. Validate surahStates
             val parsedStates = mutableListOf<SurahStateEntity>()
             if (root.has("surahStates")) {
                 val stateArray = root.getJSONArray("surahStates")
                 for (i in 0 until stateArray.length()) {
                     val obj = stateArray.getJSONObject(i)
-                    val surahNum = obj.getInt("surahNumber")
-                    if (surahNum !in 1..114) return@withContext false
+                    val rawNum = obj.opt("surahNumber")
+                    val surahNum = (rawNum as? Number)?.toInt()
+                    if (!(rawNum is Int || rawNum is Long) || surahNum == null || surahNum !in 1..114) {
+                        return@withContext BackupImportResult(false, "حالة إحدى السور تحتوي على رقم سورة غير صالح.")
+                    }
+                    val rawPos = if (obj.has("lastPositionMs")) obj.opt("lastPositionMs") else 0L
+                    val lastPos = (rawPos as? Number)?.toLong()
+                    if (rawPos !is Number || lastPos == null || lastPos < 0L) {
+                        return@withContext BackupImportResult(false, "موضع السورة المحفوظ غير صالح.")
+                    }
+                    val rawTs = if (obj.has("lastPlayedTimestamp")) obj.opt("lastPlayedTimestamp") else 0L
+                    val lastTs = (rawTs as? Number)?.toLong()
+                    if (rawTs !is Number || lastTs == null || lastTs < 0L) {
+                        return@withContext BackupImportResult(false, "تاريخ تشغيل السورة غير صالح.")
+                    }
+                    val rawFav = if (obj.has("isFavorite")) obj.opt("isFavorite") else false
+                    if (rawFav !is Boolean) {
+                        return@withContext BackupImportResult(false, "قيمة المفضلة لإحدى السور غير صالحة.")
+                    }
                     parsedStates.add(
                         SurahStateEntity(
                             surahNumber = surahNum,
-                            lastPositionMs = obj.optLong("lastPositionMs", 0L).coerceAtLeast(0L),
-                            lastPlayedTimestamp = obj.optLong("lastPlayedTimestamp", 0L).coerceAtLeast(0L),
-                            isFavorite = obj.optBoolean("isFavorite", false)
+                            lastPositionMs = lastPos,
+                            lastPlayedTimestamp = lastTs,
+                            isFavorite = rawFav
                         )
                     )
                 }
             }
 
+            // 5. Validate reciterPositions
             val parsedPositions = mutableMapOf<String, Long>()
             if (root.has("reciterPositions")) {
                 val posObj = root.getJSONObject("reciterPositions")
@@ -452,14 +601,77 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
                 while (keys.hasNext()) {
                     val key = keys.next()
                     if (key.startsWith("pos_") || key.startsWith("dur_")) {
-                        val value = posObj.getLong(key).coerceAtLeast(0L)
-                        parsedPositions[key] = value
+                        val rawVal = posObj.opt(key)
+                        val value = (rawVal as? Number)?.toLong()
+                        if (rawVal !is Number || value == null || value < 0L) {
+                            return@withContext BackupImportResult(false, "قيم مواضع الاستماع في النسخة غير صالحة.")
+                        }
+                        val mappedKey = remapPositionKeyIfNeeded(key, idMapping)
+                        parsedPositions[mappedKey] = value
+                    } else {
+                        return@withContext BackupImportResult(false, "مفتاح غير معروف في قسم مواضع الاستماع.")
                     }
                 }
             }
 
-            // Apply atomically inside a Room transaction (no partial updates on DB failure)
-            val db = QuranApp.database
+            // 6. Validate playerSettings COMPLETELY before any DB or SharedPreferences mutation
+            var validatedReciterId: String? = null
+            var validatedLastSurahId: Int? = null
+            var validatedRepeatMode: String? = null
+            var validatedPlaybackSpeed: Float? = null
+
+            if (root.has("playerSettings")) {
+                val settingsObj = root.getJSONObject("playerSettings")
+
+                if (settingsObj.has("savedRepeatMode")) {
+                    val rawRepeat = settingsObj.opt("savedRepeatMode")
+                    if (rawRepeat !is String || RepeatMode.entries.none { it.name == rawRepeat }) {
+                        return@withContext BackupImportResult(false, "نمط التكرار في إعدادات المشغل غير صالح.")
+                    }
+                    validatedRepeatMode = rawRepeat
+                }
+
+                if (settingsObj.has("savedPlaybackSpeed")) {
+                    val rawSpeed = settingsObj.opt("savedPlaybackSpeed")
+                    val speedDouble = (rawSpeed as? Number)?.toDouble()
+                    if (rawSpeed !is Number || speedDouble == null ||
+                        speedDouble.isNaN() || speedDouble.isInfinite() ||
+                        speedDouble < 0.5 || speedDouble > 2.0
+                    ) {
+                        return@withContext BackupImportResult(false, "سرعة القراءة في إعدادات المشغل غير صالحة.")
+                    }
+                    validatedPlaybackSpeed = speedDouble.toFloat()
+                }
+
+                if (settingsObj.has("lastSurahId")) {
+                    val rawLastSurah = settingsObj.opt("lastSurahId")
+                    val surahId = (rawLastSurah as? Number)?.toInt()
+                    if (!(rawLastSurah is Int || rawLastSurah is Long) || surahId == null || surahId !in 1..114) {
+                        return@withContext BackupImportResult(false, "رقم السورة الأخيرة في إعدادات المشغل غير صالح.")
+                    }
+                    validatedLastSurahId = surahId
+                }
+
+                if (settingsObj.has("savedReciterId")) {
+                    val rawReciterId = settingsObj.opt("savedReciterId")
+                    if (rawReciterId !is String || rawReciterId.trim().isEmpty()) {
+                        return@withContext BackupImportResult(false, "معرّف القارئ المحفوظ في إعدادات المشغل غير صالح.")
+                    }
+                    val candidateReciterId = idMapping[rawReciterId.trim()] ?: rawReciterId.trim()
+                    val reciterExists = DefaultReciters.list.any { it.id == candidateReciterId } ||
+                        existingCustomById.containsKey(candidateReciterId) ||
+                        resolvedRecitersById.containsKey(candidateReciterId)
+                    if (!reciterExists) {
+                        return@withContext BackupImportResult(
+                            false,
+                            "تم رفض الاستيراد: القارئ المحفوظ ($candidateReciterId) غير موجود."
+                        )
+                    }
+                    validatedReciterId = candidateReciterId
+                }
+            }
+
+            // 7. All validation passed! Apply DB changes atomically in a single Room transaction
             db.withTransaction {
                 val existingBookmarks = db.bookmarkDao().getAllBookmarksOnce()
                 parsedBookmarks.forEach { incoming ->
@@ -474,7 +686,7 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                parsedReciters.forEach { reciter ->
+                parsedRecitersToInsert.forEach { reciter ->
                     db.reciterDao().insertReciter(reciter)
                 }
 
@@ -503,8 +715,14 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // Apply validated SharedPreferences positions & settings after DB commit
-            if (parsedPositions.isNotEmpty() || root.has("playerSettings")) {
+            // 8. Apply SharedPreferences updates ONLY after DB transaction succeeded
+            val hasPrefUpdates = parsedPositions.isNotEmpty() ||
+                validatedRepeatMode != null ||
+                validatedPlaybackSpeed != null ||
+                validatedLastSurahId != null ||
+                validatedReciterId != null
+
+            if (hasPrefUpdates) {
                 val editor = playerPrefs.edit()
                 parsedPositions.forEach { (key, value) ->
                     val currentVal = playerPrefs.getLong(key, 0L)
@@ -512,23 +730,50 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
                         editor.putLong(key, value)
                     }
                 }
-                if (root.has("playerSettings")) {
-                    val settingsObj = root.getJSONObject("playerSettings")
-                    val repeatName = settingsObj.optString("savedRepeatMode", "")
-                    if (RepeatMode.entries.any { it.name == repeatName }) {
-                        editor.putString("saved_repeat_mode", repeatName)
-                    }
-                    if (settingsObj.has("savedPlaybackSpeed")) {
-                        val speed = settingsObj.getDouble("savedPlaybackSpeed").toFloat().coerceIn(0.5f, 2.0f)
-                        editor.putFloat("saved_playback_speed", speed)
+                validatedRepeatMode?.let { editor.putString("saved_repeat_mode", it) }
+                validatedPlaybackSpeed?.let { editor.putFloat("saved_playback_speed", it) }
+                validatedLastSurahId?.let { editor.putInt("last_surah_id", it) }
+                validatedReciterId?.let { reciterId ->
+                    editor.putString("saved_reciter_id", reciterId)
+                    val customEntity = resolvedRecitersById[reciterId] ?: existingCustomById[reciterId]
+                    if (customEntity != null) {
+                        val snapshot = JSONObject().apply {
+                            put("id", customEntity.id)
+                            put("name", customEntity.name)
+                            put("serverUrl", customEntity.serverUrl)
+                            put("availableSurahsCount", customEntity.availableSurahsCount)
+                            put("availableSurahsCsv", customEntity.availableSurahsCsv)
+                            put("subInfo", customEntity.subInfo)
+                        }.toString()
+                        editor.putString("saved_custom_reciter_json", snapshot)
+                    } else {
+                        editor.remove("saved_custom_reciter_json")
                     }
                 }
-                editor.apply()
+                editor.commit()
             }
 
-            true
+            playerManager.reloadPersistedStateIfIdle()
+
+            BackupImportResult(true, "تمت استعادة البيانات والإعدادات بنجاح.")
         } catch (_: Exception) {
-            false
+            BackupImportResult(false, "فشل استيراد النسخة: تنسيق JSON أو الحقول غير صالحة.")
         }
+    }
+
+    private fun remapPositionKeyIfNeeded(key: String, idMapping: Map<String, String>): String {
+        if (idMapping.isEmpty()) return key
+        val prefix = when {
+            key.startsWith("pos_") -> "pos_"
+            key.startsWith("dur_") -> "dur_"
+            else -> return key
+        }
+        val remainder = key.removePrefix(prefix)
+        val lastUnderscore = remainder.lastIndexOf('_')
+        if (lastUnderscore <= 0) return key
+        val rawReciterId = remainder.substring(0, lastUnderscore)
+        val surahPart = remainder.substring(lastUnderscore + 1)
+        val mapped = idMapping[rawReciterId] ?: return key
+        return "$prefix${mapped}_$surahPart"
     }
 }

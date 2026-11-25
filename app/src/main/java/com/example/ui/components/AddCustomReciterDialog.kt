@@ -23,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.Reciter
 
 @Composable
 fun AddCustomReciterDialog(
@@ -114,8 +115,8 @@ fun AddCustomReciterDialog(
                         errorMsg = "يرجى تعبئة جميع الحقول المطلوبة"
                         return@Button
                     }
-                    if (!cleanUrl.startsWith("https://", ignoreCase = true) || cleanUrl.length <= 10) {
-                        errorMsg = "يرجى إدخال رابط خادم يبدأ بـ https:// لضمان الاتصال الآمن"
+                    if (!Reciter.isValidHttpsServerUrl(cleanUrl)) {
+                        errorMsg = "يرجى إدخال رابط خادم صحيح يبدأ بـ https:// لضمان الاتصال الآمن"
                         return@Button
                     }
                     val count = (countText.toIntOrNull() ?: 114).coerceIn(1, 114)
