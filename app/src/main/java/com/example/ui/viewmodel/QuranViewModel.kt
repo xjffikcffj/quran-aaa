@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.room.withTransaction
 import com.example.QuranApp
 import com.example.data.ArabicSearchUtils
 import com.example.data.DefaultReciters
@@ -21,6 +22,7 @@ import com.example.model.SleepTimerOption
 import com.example.model.Surah
 import com.example.player.PlayerManager
 import com.example.receiver.FridayReminderReceiver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -36,23 +39,20 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
     private val playerManager = PlayerManager.getInstance(application)
     private val downloadManager = DownloadManager.getInstance(application)
     private val prefs = application.getSharedPreferences("quran_prefs", Context.MODE_PRIVATE)
+    private val playerPrefs = application.getSharedPreferences("quran_player_prefs", Context.MODE_PRIVATE)
 
     val playerState: StateFlow<PlayerState> = playerManager.playerState
 
-    // Search Query State
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    // Filter Favorites Only toggle
     private val _showFavoritesOnly = MutableStateFlow(false)
     val showFavoritesOnly: StateFlow<Boolean> = _showFavoritesOnly.asStateFlow()
 
-    // Favorite Surah IDs from Room
     val favoriteSurahNumbers: StateFlow<List<Int>> = QuranApp.database.surahStateDao()
         .getFavoriteSurahNumbers()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // All Reciters from Room (defaults + custom)
     val reciters: StateFlow<List<Reciter>> = QuranApp.database.reciterDao()
         .getAllReciters()
         .combine(MutableStateFlow(DefaultReciters.list)) { dbEntities, defaultList ->
@@ -64,7 +64,6 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DefaultReciters.list)
 
-    // Filtered Surahs based on search query and favorites filter
     val displayedSurahs: StateFlow<List<Surah>> = combine(
         _searchQuery,
         _showFavoritesOnly,
@@ -77,7 +76,6 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), QuranData.allSurahs)
 
-    // Bookmarks from Room
     val bookmarks: StateFlow<List<Bookmark>> = QuranApp.database.bookmarkDao()
         .getAllBookmarks()
         .combine(MutableStateFlow(emptyList<Bookmark>())) { entities, _ ->
@@ -85,16 +83,13 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Downloads from DownloadManager
     val downloads: StateFlow<List<DownloadItem>> = downloadManager.getAllDownloads()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Friday Reminder setting
     private val _fridayReminderEnabled = MutableStateFlow(prefs.getBoolean("friday_reminder", true))
     val fridayReminderEnabled: StateFlow<Boolean> = _fridayReminderEnabled.asStateFlow()
 
     init {
-        // Schedule if enabled
         if (_fridayReminderEnabled.value) {
             FridayReminderReceiver.scheduleFridayReminder(application, true)
         }
@@ -171,6 +166,10 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
         playerManager.setRepeatMode(mode)
     }
 
+    fun setPlaybackSpeed(speed: Float) {
+        playerManager.setPlaybackSpeed(speed)
+    }
+
     fun setSleepTimer(option: SleepTimerOption) {
         playerManager.setSleepTimer(option)
     }
@@ -202,7 +201,6 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
 
     fun playFromBookmark(bookmark: Bookmark) {
         val surah = QuranData.getSurahById(bookmark.surahNumber) ?: return
-        // Do not lose favorite/bookmark data when switching reciter; play with user's current reciter or bookmark's reciter
         val reciter = reciters.value.firstOrNull { it.id == bookmark.reciterId }
             ?: (playerState.value.currentReciter ?: DefaultReciters.defaultReciter)
         playerManager.setReciter(reciter)
@@ -211,6 +209,10 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startDownload(surah: Surah) {
         val reciter = playerState.value.currentReciter ?: DefaultReciters.defaultReciter
+        downloadManager.startDownload(reciter, surah)
+    }
+
+    fun startDownload(reciter: Reciter, surah: Surah) {
         downloadManager.startDownload(reciter, surah)
     }
 
@@ -239,7 +241,8 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addCustomReciter(name: String, serverUrl: String, availableCount: Int) {
         viewModelScope.launch {
-            val cleanUrl = if (serverUrl.endsWith("/")) serverUrl else "$serverUrl/"
+            val trimmedUrl = serverUrl.trim()
+            val cleanUrl = if (trimmedUrl.endsWith("/")) trimmedUrl else "$trimmedUrl/"
             val id = "custom_${System.currentTimeMillis()}"
             val newReciter = Reciter(
                 id = id,
@@ -256,77 +259,273 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteCustomReciter(reciterId: String) {
         viewModelScope.launch {
             QuranApp.database.reciterDao().deleteCustomReciter(reciterId)
+            if (playerState.value.currentReciter?.id == reciterId) {
+                playerManager.setReciter(DefaultReciters.defaultReciter)
+            }
         }
     }
 
-    suspend fun exportBackupJson(): String {
+    suspend fun exportBackupJson(): String = withContext(Dispatchers.IO) {
+        val db = QuranApp.database
         val root = JSONObject()
+        root.put("version", 2)
+        root.put("exportedAt", System.currentTimeMillis())
+
+        // 1. Bookmarks
         val bookmarksArray = JSONArray()
-        bookmarks.value.forEach { b ->
-            val obj = JSONObject().apply {
-                put("surahNumber", b.surahNumber)
-                put("surahName", b.surahName)
-                put("reciterId", b.reciterId)
-                put("reciterName", b.reciterName)
-                put("positionMs", b.positionMs)
-                put("note", b.note)
-                put("timestamp", b.timestamp)
-            }
-            bookmarksArray.put(obj)
+        db.bookmarkDao().getAllBookmarksOnce().forEach { b ->
+            bookmarksArray.put(
+                JSONObject().apply {
+                    put("surahNumber", b.surahNumber)
+                    put("surahName", b.surahName)
+                    put("reciterId", b.reciterId)
+                    put("reciterName", b.reciterName)
+                    put("positionMs", b.positionMs)
+                    put("note", b.note)
+                    put("timestamp", b.timestamp)
+                }
+            )
         }
         root.put("bookmarks", bookmarksArray)
 
+        // 2. Custom Reciters
         val customRecitersArray = JSONArray()
-        reciters.value.filter { it.isCustom }.forEach { r ->
-            val obj = JSONObject().apply {
-                put("id", r.id)
-                put("name", r.name)
-                put("serverUrl", r.serverUrl)
-                put("availableSurahsCount", r.availableSurahsCount)
-            }
-            customRecitersArray.put(obj)
+        db.reciterDao().getAllRecitersOnce().filter { it.isCustom }.forEach { r ->
+            customRecitersArray.put(
+                JSONObject().apply {
+                    put("id", r.id)
+                    put("name", r.name)
+                    put("serverUrl", r.serverUrl)
+                    put("availableSurahsCount", r.availableSurahsCount)
+                    put("availableSurahsCsv", r.availableSurahsCsv)
+                    put("subInfo", r.subInfo)
+                }
+            )
         }
         root.put("customReciters", customRecitersArray)
 
-        return root.toString(2)
+        // 3. Favorites & Surah States
+        val allStates = db.surahStateDao().getAllStatesOnce()
+        val favoritesArray = JSONArray()
+        val surahStatesArray = JSONArray()
+        allStates.forEach { state ->
+            if (state.isFavorite) {
+                favoritesArray.put(state.surahNumber)
+            }
+            surahStatesArray.put(
+                JSONObject().apply {
+                    put("surahNumber", state.surahNumber)
+                    put("isFavorite", state.isFavorite)
+                    put("lastPositionMs", state.lastPositionMs)
+                    put("lastPlayedTimestamp", state.lastPlayedTimestamp)
+                }
+            )
+        }
+        root.put("favorites", favoritesArray)
+        root.put("surahStates", surahStatesArray)
+
+        // 4. Per-reciter playback positions & settings
+        val positionsObj = JSONObject()
+        playerPrefs.all.forEach { (key, value) ->
+            if ((key.startsWith("pos_") || key.startsWith("dur_")) && value is Number) {
+                positionsObj.put(key, value.toLong())
+            }
+        }
+        root.put("reciterPositions", positionsObj)
+
+        val settingsObj = JSONObject().apply {
+            put("savedReciterId", playerPrefs.getString("saved_reciter_id", DefaultReciters.defaultReciter.id))
+            put("lastSurahId", playerPrefs.getInt("last_surah_id", 1))
+            put("savedRepeatMode", playerPrefs.getString("saved_repeat_mode", RepeatMode.ALL.name))
+            put("savedPlaybackSpeed", playerPrefs.getFloat("saved_playback_speed", 1.0f).toDouble())
+        }
+        root.put("playerSettings", settingsObj)
+
+        root.toString(2)
     }
 
-    suspend fun importBackupJson(jsonString: String): Boolean {
-        return try {
-            val root = JSONObject(jsonString)
+    suspend fun importBackupJson(jsonString: String): Boolean = withContext(Dispatchers.IO) {
+        if (jsonString.isBlank()) return@withContext false
+
+        try {
+            val root = JSONObject(jsonString.trim())
+            val hasRecognizedSection = root.has("bookmarks") ||
+                root.has("customReciters") ||
+                root.has("favorites") ||
+                root.has("surahStates") ||
+                root.has("reciterPositions")
+            if (!hasRecognizedSection) return@withContext false
+
+            // Pre-validate all sections before mutating DB or prefs
+            val parsedBookmarks = mutableListOf<BookmarkEntity>()
             if (root.has("bookmarks")) {
                 val array = root.getJSONArray("bookmarks")
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
-                    val bookmark = BookmarkEntity(
-                        surahNumber = obj.getInt("surahNumber"),
-                        surahName = obj.getString("surahName"),
-                        reciterId = obj.getString("reciterId"),
-                        reciterName = obj.getString("reciterName"),
-                        positionMs = obj.getLong("positionMs"),
-                        note = obj.optString("note", ""),
-                        timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                    val surahNumber = obj.getInt("surahNumber")
+                    if (surahNumber !in 1..114) return@withContext false
+                    val positionMs = obj.getLong("positionMs").coerceAtLeast(0L)
+                    val reciterId = obj.getString("reciterId").trim()
+                    val reciterName = obj.getString("reciterName").trim()
+                    if (reciterId.isEmpty() || reciterName.isEmpty()) return@withContext false
+                    val surahName = obj.optString("surahName").ifBlank {
+                        QuranData.getSurahById(surahNumber)?.name ?: return@withContext false
+                    }
+                    parsedBookmarks.add(
+                        BookmarkEntity(
+                            surahNumber = surahNumber,
+                            surahName = surahName,
+                            reciterId = reciterId,
+                            reciterName = reciterName,
+                            positionMs = positionMs,
+                            note = obj.optString("note", "").trim(),
+                            timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                        )
                     )
-                    QuranApp.database.bookmarkDao().insertBookmark(bookmark)
                 }
             }
 
+            val parsedReciters = mutableListOf<ReciterEntity>()
             if (root.has("customReciters")) {
                 val array = root.getJSONArray("customReciters")
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
-                    val entity = ReciterEntity(
-                        id = obj.getString("id"),
-                        name = obj.getString("name"),
-                        serverUrl = obj.getString("serverUrl"),
-                        availableSurahsCount = obj.getInt("availableSurahsCount"),
-                        availableSurahsCsv = "",
-                        isCustom = true,
-                        subInfo = "قارئ مخصص مستعاد من النسخة الاحتياطية"
+                    val rawId = obj.getString("id").trim()
+                    val name = obj.getString("name").trim()
+                    val serverUrl = obj.getString("serverUrl").trim()
+                    val count = obj.getInt("availableSurahsCount").coerceIn(1, 114)
+                    if (rawId.isEmpty() || name.isEmpty()) return@withContext false
+                    if (!serverUrl.startsWith("https://", ignoreCase = true) &&
+                        !serverUrl.startsWith("http://", ignoreCase = true)
+                    ) {
+                        return@withContext false
+                    }
+                    val safeId = if (DefaultReciters.list.any { it.id == rawId }) "custom_$rawId" else rawId
+                    val normalizedUrl = if (serverUrl.endsWith("/")) serverUrl else "$serverUrl/"
+                    parsedReciters.add(
+                        ReciterEntity(
+                            id = safeId,
+                            name = name,
+                            serverUrl = normalizedUrl,
+                            availableSurahsCount = count,
+                            availableSurahsCsv = obj.optString("availableSurahsCsv", ""),
+                            isCustom = true,
+                            subInfo = obj.optString("subInfo", "قارئ مخصص مستعاد من النسخة الاحتياطية")
+                                .ifBlank { "قارئ مخصص مستعاد من النسخة الاحتياطية" }
+                        )
                     )
-                    QuranApp.database.reciterDao().insertReciter(entity)
                 }
             }
+
+            val parsedFavorites = mutableSetOf<Int>()
+            if (root.has("favorites")) {
+                val favArray = root.getJSONArray("favorites")
+                for (i in 0 until favArray.length()) {
+                    val surahNum = favArray.getInt(i)
+                    if (surahNum !in 1..114) return@withContext false
+                    parsedFavorites.add(surahNum)
+                }
+            }
+
+            val parsedStates = mutableListOf<SurahStateEntity>()
+            if (root.has("surahStates")) {
+                val stateArray = root.getJSONArray("surahStates")
+                for (i in 0 until stateArray.length()) {
+                    val obj = stateArray.getJSONObject(i)
+                    val surahNum = obj.getInt("surahNumber")
+                    if (surahNum !in 1..114) return@withContext false
+                    parsedStates.add(
+                        SurahStateEntity(
+                            surahNumber = surahNum,
+                            lastPositionMs = obj.optLong("lastPositionMs", 0L).coerceAtLeast(0L),
+                            lastPlayedTimestamp = obj.optLong("lastPlayedTimestamp", 0L).coerceAtLeast(0L),
+                            isFavorite = obj.optBoolean("isFavorite", false)
+                        )
+                    )
+                }
+            }
+
+            val parsedPositions = mutableMapOf<String, Long>()
+            if (root.has("reciterPositions")) {
+                val posObj = root.getJSONObject("reciterPositions")
+                val keys = posObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (key.startsWith("pos_") || key.startsWith("dur_")) {
+                        val value = posObj.getLong(key).coerceAtLeast(0L)
+                        parsedPositions[key] = value
+                    }
+                }
+            }
+
+            // Apply atomically inside a Room transaction (no partial updates on DB failure)
+            val db = QuranApp.database
+            db.withTransaction {
+                val existingBookmarks = db.bookmarkDao().getAllBookmarksOnce()
+                parsedBookmarks.forEach { incoming ->
+                    val alreadyExists = existingBookmarks.any {
+                        it.surahNumber == incoming.surahNumber &&
+                            it.reciterId == incoming.reciterId &&
+                            it.positionMs == incoming.positionMs &&
+                            it.note == incoming.note
+                    }
+                    if (!alreadyExists) {
+                        db.bookmarkDao().insertBookmark(incoming)
+                    }
+                }
+
+                parsedReciters.forEach { reciter ->
+                    db.reciterDao().insertReciter(reciter)
+                }
+
+                // Merge SurahStates & Favorites without deleting existing user favorites/progress
+                val mergedSurahNumbers = (parsedStates.map { it.surahNumber } + parsedFavorites).toSet()
+                val stateMap = parsedStates.associateBy { it.surahNumber }
+                for (surahNum in mergedSurahNumbers) {
+                    val existing = db.surahStateDao().getState(surahNum)
+                    val incoming = stateMap[surahNum]
+                    val mergedFav = (existing?.isFavorite == true) ||
+                        (incoming?.isFavorite == true) ||
+                        parsedFavorites.contains(surahNum)
+                    val useIncomingPos = incoming != null &&
+                        incoming.lastPositionMs > 0L &&
+                        (existing == null || incoming.lastPlayedTimestamp >= existing.lastPlayedTimestamp)
+                    val mergedPos = if (useIncomingPos) incoming!!.lastPositionMs else (existing?.lastPositionMs ?: 0L)
+                    val mergedTs = maxOf(existing?.lastPlayedTimestamp ?: 0L, incoming?.lastPlayedTimestamp ?: 0L)
+                    db.surahStateDao().insertOrUpdate(
+                        SurahStateEntity(
+                            surahNumber = surahNum,
+                            lastPositionMs = mergedPos,
+                            lastPlayedTimestamp = mergedTs,
+                            isFavorite = mergedFav
+                        )
+                    )
+                }
+            }
+
+            // Apply validated SharedPreferences positions & settings after DB commit
+            if (parsedPositions.isNotEmpty() || root.has("playerSettings")) {
+                val editor = playerPrefs.edit()
+                parsedPositions.forEach { (key, value) ->
+                    val currentVal = playerPrefs.getLong(key, 0L)
+                    if (value > 0L || currentVal == 0L) {
+                        editor.putLong(key, value)
+                    }
+                }
+                if (root.has("playerSettings")) {
+                    val settingsObj = root.getJSONObject("playerSettings")
+                    val repeatName = settingsObj.optString("savedRepeatMode", "")
+                    if (RepeatMode.entries.any { it.name == repeatName }) {
+                        editor.putString("saved_repeat_mode", repeatName)
+                    }
+                    if (settingsObj.has("savedPlaybackSpeed")) {
+                        val speed = settingsObj.getDouble("savedPlaybackSpeed").toFloat().coerceIn(0.5f, 2.0f)
+                        editor.putFloat("saved_playback_speed", speed)
+                    }
+                }
+                editor.apply()
+            }
+
             true
         } catch (_: Exception) {
             false

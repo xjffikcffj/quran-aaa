@@ -1,36 +1,39 @@
 package com.example
 
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.DownloadDone
-import androidx.compose.material.icons.filled.RecordVoiceOver
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.filled.NightsStay
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -66,18 +69,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import android.app.Activity
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
-import android.util.Log
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.example.ads.ConsentManager
 import com.example.ads.InterstitialAdManager
 import com.example.data.QuranData
 import com.example.model.RepeatMode
+import com.example.model.SleepTimerOption
 import com.example.model.Surah
 import com.example.ui.components.AdBannerView
 import com.example.ui.components.AddBookmarkDialog
@@ -92,34 +89,52 @@ import com.example.ui.screens.SurahsScreen
 import com.example.ui.theme.GoldAccent
 import com.example.ui.theme.QuranAppTheme
 import com.example.ui.viewmodel.QuranViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: QuranViewModel by viewModels()
+    private val navigateToSurahEvent = MutableStateFlow<Int?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Initialize AdMob consent and preload interstitial ad
         ConsentManager.gatherConsent(this) {
             InterstitialAdManager.loadAd(this)
         }
 
-        // Check if opened from Friday notification to select Al-Kahf without auto-playing
-        val targetSurahId = intent.getIntExtra("NAVIGATE_TO_SURAH", -1)
-        if (targetSurahId > 0) {
-            val surah = QuranData.getSurahById(targetSurahId)
-            if (surah != null) {
-                viewModel.playSurah(surah, autoPlay = false)
-            }
-        }
+        handleNavigationIntent(intent)
 
         setContent {
             QuranAppTheme {
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-                    QuranMainScreen(viewModel = viewModel)
+                    val pendingSurahNavigation by navigateToSurahEvent.collectAsState()
+                    QuranMainScreen(
+                        viewModel = viewModel,
+                        pendingSurahNavigation = pendingSurahNavigation,
+                        onConsumedSurahNavigation = { navigateToSurahEvent.value = null }
+                    )
                 }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNavigationIntent(intent)
+    }
+
+    private fun handleNavigationIntent(intent: Intent?) {
+        val targetSurahId = intent?.getIntExtra("NAVIGATE_TO_SURAH", -1) ?: -1
+        if (targetSurahId > 0) {
+            intent?.removeExtra("NAVIGATE_TO_SURAH")
+            val surah = QuranData.getSurahById(targetSurahId)
+            if (surah != null) {
+                viewModel.playSurah(surah, autoPlay = false)
+                navigateToSurahEvent.value = targetSurahId
             }
         }
     }
@@ -134,9 +149,14 @@ enum class QuranNavTab(val title: String, val icon: ImageVector, val tag: String
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun QuranMainScreen(viewModel: QuranViewModel) {
+fun QuranMainScreen(
+    viewModel: QuranViewModel,
+    pendingSurahNavigation: Int? = null,
+    onConsumedSurahNavigation: () -> Unit = {}
+) {
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
+    var showDeveloperScreen by remember { mutableStateOf(false) }
     var showFullPlayer by remember { mutableStateOf(false) }
     var showSleepTimerDialog by remember { mutableStateOf(false) }
     var bookmarkSurahTarget by remember { mutableStateOf<Surah?>(null) }
@@ -144,14 +164,13 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
     val playerState by viewModel.playerState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Request POST_NOTIFICATIONS on Android 13+ (API 33+) gracefully
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
             Log.i("MainActivity", "POST_NOTIFICATIONS granted.")
         } else {
-            Log.w("MainActivity", "POST_NOTIFICATIONS denied. Audio playback continues without system notification controls.")
+            Log.w("MainActivity", "POST_NOTIFICATIONS denied. Audio playback continues without notification controls.")
         }
     }
 
@@ -167,19 +186,26 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
         }
     }
 
-    // Display error message if player encounters an issue
+    LaunchedEffect(pendingSurahNavigation) {
+        if (pendingSurahNavigation != null && pendingSurahNavigation > 0) {
+            showDeveloperScreen = false
+            selectedTab = 0
+            showFullPlayer = false
+            onConsumedSurahNavigation()
+        }
+    }
+
     LaunchedEffect(playerState.errorMessage) {
         playerState.errorMessage?.let { error ->
             snackbarHostState.showSnackbar(error)
         }
     }
 
-    // Handle system back navigation
-    BackHandler(enabled = showFullPlayer || selectedTab != 0) {
-        if (showFullPlayer) {
-            showFullPlayer = false
-        } else if (selectedTab != 0) {
-            selectedTab = 0
+    BackHandler(enabled = showFullPlayer || showDeveloperScreen || selectedTab != 0) {
+        when {
+            showFullPlayer -> showFullPlayer = false
+            showDeveloperScreen -> showDeveloperScreen = false
+            selectedTab != 0 -> selectedTab = 0
         }
     }
 
@@ -195,7 +221,7 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
                     ) {
                         Column {
                             Text(
-                                text = "القرآن الكريم",
+                                text = if (showDeveloperScreen) "الإعدادات والإدارة" else "القرآن الكريم",
                                 style = MaterialTheme.typography.titleLarge.copy(
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 20.sp,
@@ -212,6 +238,20 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
                         }
                     }
                 },
+                navigationIcon = {
+                    if (showDeveloperScreen) {
+                        IconButton(
+                            onClick = { showDeveloperScreen = false },
+                            modifier = Modifier.testTag("developer_back_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "العودة",
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                },
                 actions = {
                     Box {
                         IconButton(
@@ -221,7 +261,7 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
                             Icon(
                                 imageVector = Icons.Default.NightsStay,
                                 contentDescription = "مؤقت النوم",
-                                tint = if (playerState.sleepTimerOption != com.example.model.SleepTimerOption.OFF) GoldAccent else MaterialTheme.colorScheme.onSurfaceVariant
+                                tint = if (playerState.sleepTimerOption != SleepTimerOption.OFF) GoldAccent else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         if (playerState.sleepTimerSecondsRemaining > 0) {
@@ -235,7 +275,7 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
                                     .padding(4.dp)
                             ) {
                                 Text(
-                                    text = String.format("%02d:%02d", mins, secs),
+                                    text = String.format(Locale.US, "%02d:%02d", mins, secs),
                                     style = MaterialTheme.typography.labelSmall.copy(
                                         fontSize = 8.sp,
                                         fontWeight = FontWeight.Bold,
@@ -245,6 +285,17 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
                                 )
                             }
                         }
+                    }
+
+                    IconButton(
+                        onClick = { showDeveloperScreen = !showDeveloperScreen },
+                        modifier = Modifier.testTag("topbar_developer_settings")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "لوحة المطور والإعدادات",
+                            tint = if (showDeveloperScreen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -259,31 +310,30 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
                     .fillMaxWidth()
                     .windowInsetsPadding(WindowInsets.navigationBars)
             ) {
-                // Docked Mini Player
                 MiniPlayerBar(
                     playerState = playerState,
                     onBarClick = { showFullPlayer = true },
                     onPlayPauseClick = { viewModel.togglePlayPause() },
-                    onNextClick = { viewModel.playNext() }
+                    onNextClick = { viewModel.playNext() },
+                    onPrevClick = { viewModel.playPrevious() }
                 )
 
-                // Adaptive AdMob Banner Ad with explicit minimum height constraint
                 AdBannerView(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 50.dp)
+                    modifier = Modifier.fillMaxWidth()
                 )
 
-                // Navigation Bar
                 NavigationBar(
                     containerColor = MaterialTheme.colorScheme.surface,
                     tonalElevation = 8.dp
                 ) {
                     QuranNavTab.values().forEachIndexed { index, tab ->
-                        val isSelected = selectedTab == index
+                        val isSelected = !showDeveloperScreen && selectedTab == index
                         NavigationBarItem(
                             selected = isSelected,
-                            onClick = { selectedTab = index },
+                            onClick = {
+                                showDeveloperScreen = false
+                                selectedTab = index
+                            },
                             icon = {
                                 Icon(
                                     imageVector = tab.icon,
@@ -319,41 +369,44 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            when (selectedTab) {
-                0 -> SurahsScreen(
-                    viewModel = viewModel,
-                    onSurahSelected = { surah ->
-                        val isNewSurah = playerState.currentSurah?.id != surah.id
-                        val activity = context as? Activity
-                        if (activity != null && isNewSurah) {
-                            InterstitialAdManager.showAdBeforeSurah(
-                                activity = activity,
-                                isNewSurah = true
-                            ) {
-                                viewModel.playSurah(surah)
+            if (showDeveloperScreen) {
+                DeveloperScreen(viewModel = viewModel)
+            } else {
+                when (selectedTab) {
+                    0 -> SurahsScreen(
+                        viewModel = viewModel,
+                        onSurahSelected = { surah ->
+                            val isNewSurah = playerState.currentSurah?.id != surah.id
+                            val activity = context as? Activity
+                            if (activity != null && isNewSurah) {
+                                InterstitialAdManager.showAdBeforeSurah(
+                                    activity = activity,
+                                    isNewSurah = true
+                                ) {
+                                    viewModel.playSurah(surah)
+                                    showFullPlayer = true
+                                }
+                            } else {
+                                if (isNewSurah) {
+                                    viewModel.playSurah(surah)
+                                } else if (!playerState.isPlaying) {
+                                    viewModel.resume()
+                                }
                                 showFullPlayer = true
                             }
-                        } else {
-                            if (isNewSurah) {
-                                viewModel.playSurah(surah)
-                            } else if (!playerState.isPlaying) {
-                                viewModel.resume()
-                            }
-                            showFullPlayer = true
+                        },
+                        onOpenAddBookmark = { surah ->
+                            bookmarkSurahTarget = surah
                         }
-                    },
-                    onOpenAddBookmark = { surah ->
-                        bookmarkSurahTarget = surah
-                    }
-                )
-                1 -> RecitersScreen(viewModel = viewModel)
-                2 -> DownloadsScreen(viewModel = viewModel)
-                3 -> BookmarksScreen(viewModel = viewModel)
+                    )
+                    1 -> RecitersScreen(viewModel = viewModel)
+                    2 -> DownloadsScreen(viewModel = viewModel)
+                    3 -> BookmarksScreen(viewModel = viewModel)
+                }
             }
         }
     }
 
-    // Full Player BottomSheet
     if (showFullPlayer && playerState.currentSurah != null) {
         val currentSurah = playerState.currentSurah!!
         val isDownloaded = viewModel.isSurahDownloaded(currentSurah.id)
@@ -380,13 +433,19 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
                 }
                 Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             },
+            onCycleSpeed = {
+                val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+                val currentIdx = speeds.indexOfFirst { kotlin.math.abs(it - playerState.playbackSpeed) < 0.05f }
+                val nextSpeed = speeds[(currentIdx + 1) % speeds.size]
+                viewModel.setPlaybackSpeed(nextSpeed)
+                Toast.makeText(context, "سرعة القراءة: ${nextSpeed}x", Toast.LENGTH_SHORT).show()
+            },
             onOpenSleepTimer = { showSleepTimerDialog = true },
             onOpenAddBookmark = { bookmarkSurahTarget = currentSurah },
             onDownloadClick = { viewModel.startDownload(currentSurah) }
         )
     }
 
-    // Sleep Timer Dialog
     if (showSleepTimerDialog) {
         SleepTimerDialog(
             currentOption = playerState.sleepTimerOption,
@@ -402,7 +461,6 @@ fun QuranMainScreen(viewModel: QuranViewModel) {
         )
     }
 
-    // Add Bookmark Dialog
     bookmarkSurahTarget?.let { surah ->
         val pos = if (playerState.currentSurah?.id == surah.id) playerState.currentPositionMs else 0L
         AddBookmarkDialog(

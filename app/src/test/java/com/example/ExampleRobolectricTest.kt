@@ -318,4 +318,113 @@ class ExampleRobolectricTest {
     assertEquals(com.example.model.SleepTimerOption.OFF, playerManager.playerState.value.sleepTimerOption)
     assertEquals(0L, playerManager.playerState.value.sleepTimerSecondsRemaining)
   }
+
+  @Test
+  fun `verify playback speed persists and updates playerState without auto-playing`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val playerManager = com.example.player.PlayerManager.getInstance(context)
+
+    playerManager.stop()
+    playerManager.setPlaybackSpeed(1.5f)
+    assertEquals(1.5f, playerManager.playerState.value.playbackSpeed, 0.001f)
+    org.junit.Assert.assertFalse(playerManager.playerState.value.isPlaying)
+
+    // Out-of-bounds speeds should clamp cleanly
+    playerManager.setPlaybackSpeed(4.0f)
+    assertEquals(2.0f, playerManager.playerState.value.playbackSpeed, 0.001f)
+    playerManager.setPlaybackSpeed(1.0f)
+  }
+
+  @Test
+  fun `verify FridayReminderReceiver ignores unrecognized external actions`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val receiver = com.example.receiver.FridayReminderReceiver()
+    val notificationManager =
+      context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+    val shadowNotificationManager = org.robolectric.Shadows.shadowOf(notificationManager)
+    val initialCount = shadowNotificationManager.allNotifications.size
+
+    val maliciousIntent = android.content.Intent("com.attacker.RANDOM_ACTION")
+    receiver.onReceive(context, maliciousIntent)
+
+    assertEquals(initialCount, shadowNotificationManager.allNotifications.size)
+  }
+
+  @Test
+  fun `verify custom reciter persists via PlayerManager and backup export-import includes all data`() {
+    kotlinx.coroutines.runBlocking {
+      val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+      val viewModel = com.example.ui.viewmodel.QuranViewModel(app)
+
+      // Seed custom reciter, favorite, bookmark, and saved position
+      val customReciter = com.example.model.Reciter(
+        id = "custom_test_1",
+        name = "قارئ اختباري",
+        serverUrl = "https://example.com/quran/",
+        availableSurahsCount = 50,
+        isCustom = true
+      )
+      com.example.QuranApp.database.reciterDao()
+        .insertReciter(com.example.data.local.ReciterEntity.fromReciter(customReciter))
+      com.example.QuranApp.database.surahStateDao().insertOrUpdate(
+        com.example.data.local.SurahStateEntity(surahNumber = 18, lastPositionMs = 45_000L, isFavorite = true)
+      )
+      com.example.QuranApp.database.bookmarkDao().insertBookmark(
+        com.example.data.local.BookmarkEntity(
+          surahNumber = 18,
+          surahName = "الكهف",
+          reciterId = "custom_test_1",
+          reciterName = "قارئ اختباري",
+          positionMs = 45_000L,
+          note = "تذكير اختبار",
+          timestamp = 123456L
+        )
+      )
+      com.example.player.PlayerManager.getInstance(app).savePosition("custom_test_1", 18, 45_000L, 600_000L, force = true)
+
+      val exportedJson = viewModel.exportBackupJson()
+      org.junit.Assert.assertTrue(exportedJson.contains("custom_test_1"))
+      org.junit.Assert.assertTrue(exportedJson.contains("\"favorites\""))
+      org.junit.Assert.assertTrue(exportedJson.contains("\"reciterPositions\""))
+      org.junit.Assert.assertTrue(exportedJson.contains("تذكير اختبار"))
+
+      // Invalid JSON must be rejected cleanly
+      org.junit.Assert.assertFalse(viewModel.importBackupJson("{not valid json"))
+      org.junit.Assert.assertFalse(viewModel.importBackupJson("{\"unrelated\": 123}"))
+
+      // Valid JSON re-import succeeds and keeps deduplicated bookmarks
+      org.junit.Assert.assertTrue(viewModel.importBackupJson(exportedJson))
+      val allBookmarks = com.example.QuranApp.database.bookmarkDao().getAllBookmarksOnce()
+      assertEquals(1, allBookmarks.count { it.note == "تذكير اختبار" })
+    }
+  }
+
+  @Test
+  fun `verify stuck DOWNLOADING rows recover to FAILED without deleting completed files`() {
+    kotlinx.coroutines.runBlocking {
+      val context = ApplicationProvider.getApplicationContext<Context>()
+      val dm = com.example.download.DownloadManager.getInstance(context)
+      val dao = com.example.QuranApp.database.downloadDao()
+
+      dao.insertOrUpdate(
+        com.example.data.local.DownloadEntity(
+          id = "afs_2",
+          surahNumber = 2,
+          surahName = "البقرة",
+          reciterId = "afs",
+          reciterName = "مشاري العفاسي",
+          localFilePath = dm.getLocalAudioFile("afs", 2).absolutePath,
+          fileSizeBytes = 1000L,
+          status = com.example.model.DownloadStatus.DOWNLOADING.name,
+          progress = 40,
+          errorMessage = null
+        )
+      )
+
+      dao.markStuckDownloadsFailed("توقف التنزيل قبل اكتماله، اضغط لإعادة المحاولة")
+      val recovered = dao.getDownloadById("afs_2")
+      assertEquals(com.example.model.DownloadStatus.FAILED.name, recovered?.status)
+    }
+  }
 }
+

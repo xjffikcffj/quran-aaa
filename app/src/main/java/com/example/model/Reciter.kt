@@ -1,5 +1,7 @@
 package com.example.model
 
+import java.util.Locale
+
 data class Reciter(
     val id: String,
     val name: String,
@@ -10,19 +12,22 @@ data class Reciter(
     val subInfo: String = ""
 ) {
     fun isSurahAvailable(surahId: Int): Boolean {
-        return if (availableSurahsCount == 114 || availableSurahsList.isEmpty()) {
-            true
-        } else {
-            availableSurahsList.contains(surahId)
+        if (surahId !in 1..114) return false
+        return when {
+            availableSurahsList.isNotEmpty() -> availableSurahsList.contains(surahId)
+            availableSurahsCount >= 114 -> true
+            availableSurahsCount <= 0 -> false
+            else -> surahId <= availableSurahsCount
         }
     }
 
     fun getAudioUrl(surahId: Int): String {
-        val paddedNumber = String.format("%03d", surahId)
-        return if (serverUrl.endsWith("/")) {
-            "$serverUrl$paddedNumber.mp3"
+        val paddedNumber = String.format(Locale.US, "%03d", surahId)
+        val trimmed = serverUrl.trim()
+        return if (trimmed.endsWith("/")) {
+            "$trimmed$paddedNumber.mp3"
         } else {
-            "$serverUrl/$paddedNumber.mp3"
+            "$trimmed/$paddedNumber.mp3"
         }
     }
 }

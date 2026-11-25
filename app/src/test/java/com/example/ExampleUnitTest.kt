@@ -225,5 +225,66 @@ class ExampleUnitTest {
         // Case E: Brand new surah with no prior saved position
         assertEquals(0L, calculateTargetSeek(null, false, 0L, 0L))
     }
+
+    @Test
+    fun testPartialReciterAvailabilityDoesNotAllowUnavailableSurahs() {
+        val partialCustomReciter = com.example.model.Reciter(
+            id = "custom_1",
+            name = "قارئ جزئي",
+            serverUrl = "https://example.com/audio/",
+            availableSurahsCount = 30,
+            availableSurahsList = emptySet(),
+            isCustom = true
+        )
+        assertTrue(partialCustomReciter.isSurahAvailable(1))
+        assertTrue(partialCustomReciter.isSurahAvailable(30))
+        assertFalse(partialCustomReciter.isSurahAvailable(31))
+        assertFalse(partialCustomReciter.isSurahAvailable(114))
+        assertFalse(partialCustomReciter.isSurahAvailable(0))
+
+        val explicitSetReciter = com.example.model.Reciter(
+            id = "custom_2",
+            name = "قارئ محدد",
+            serverUrl = "https://example.com/audio",
+            availableSurahsCount = 2,
+            availableSurahsList = setOf(1, 18),
+            isCustom = true
+        )
+        assertTrue(explicitSetReciter.isSurahAvailable(1))
+        assertTrue(explicitSetReciter.isSurahAvailable(18))
+        assertFalse(explicitSetReciter.isSurahAvailable(2))
+        assertEquals("https://example.com/audio/018.mp3", explicitSetReciter.getAudioUrl(18))
+    }
+
+    @Test
+    fun testAbdulrazzaqAlDulaimiAudioUrlInArabicLocale() {
+        val prevLocale = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale("ar", "EG"))
+            val dl = DefaultReciters.getReciterById("abdulrazzaq_dlaimi")
+            assertEquals("abdulrazzaq_dlaimi", dl.id)
+            assertEquals("https://archive.org/download/mmmmmm002_20220618/001.mp3", dl.getAudioUrl(1))
+            assertEquals("https://archive.org/download/mmmmmm002_20220618/018.mp3", dl.getAudioUrl(18))
+        } finally {
+            java.util.Locale.setDefault(prevLocale)
+        }
+    }
+
+    @Test
+    fun testMp3HeaderValidationRejectsHtmlAndAcceptsId3AndMpegSync() {
+        val htmlPayload = "<!DOCTYPE html><html><body>Error</body></html>".toByteArray()
+        assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(htmlPayload))
+
+        val jsonPayload = "{\"error\":\"rate_limited\"}".toByteArray()
+        assertFalse(com.example.download.DownloadManager.hasValidMp3HeaderBytes(jsonPayload))
+
+        val id3Payload = byteArrayOf(0x49, 0x44, 0x33, 0x03, 0x00, 0x00)
+        assertTrue(com.example.download.DownloadManager.hasValidMp3HeaderBytes(id3Payload))
+
+        // Valid MPEG-1 Layer III frame header: 0xFF 0xFB 0x90 0x00
+        val mpegSyncPayload = byteArrayOf(0xFF.toByte(), 0xFB.toByte(), 0x90.toByte(), 0x00)
+        assertTrue(com.example.download.DownloadManager.hasValidMp3HeaderBytes(mpegSyncPayload))
+    }
 }
+
 

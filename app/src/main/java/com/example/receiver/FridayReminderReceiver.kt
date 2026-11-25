@@ -16,24 +16,24 @@ import java.util.Calendar
 class FridayReminderReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
-        val action = intent?.action
+        val action = intent?.action ?: return
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val isEnabled = prefs.getBoolean(PREF_KEY_FRIDAY_REMINDER, true)
 
-        if (action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED) {
-            // Device rebooted or app replaced: restore schedule without showing notification
-            if (isEnabled) {
-                scheduleFridayReminder(context, true)
+        when (action) {
+            Intent.ACTION_BOOT_COMPLETED,
+            Intent.ACTION_MY_PACKAGE_REPLACED -> {
+                if (isEnabled) {
+                    scheduleFridayReminder(context, true)
+                }
             }
-            return
-        }
-
-        // Alarm triggered: show notification
-        showFridayNotification(context)
-
-        // Reschedule for the next Friday to ensure continuous weekly cycle
-        if (isEnabled) {
-            scheduleFridayReminder(context, true)
+            ACTION_FRIDAY_ALARM -> {
+                if (isEnabled) {
+                    showFridayNotification(context)
+                    scheduleFridayReminder(context, true)
+                }
+            }
+            else -> return
         }
     }
 

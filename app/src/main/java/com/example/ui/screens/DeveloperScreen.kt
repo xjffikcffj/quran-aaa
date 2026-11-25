@@ -1,10 +1,11 @@
 package com.example.ui.screens
 
+import android.content.Intent
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,25 +17,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Backup
-import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,7 +44,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -54,13 +53,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -84,9 +80,49 @@ fun DeveloperScreen(
     val fridayReminderEnabled by viewModel.fridayReminderEnabled.collectAsState()
 
     var showAddReciterDialog by remember { mutableStateOf(false) }
-    var backupJsonDialog by remember { mutableStateOf<String?>(null) }
     var importJsonText by remember { mutableStateOf("") }
     var showImportField by remember { mutableStateOf(false) }
+    var importFeedback by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
+
+    val createBackupFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            coroutineScope.launch {
+                try {
+                    val json = viewModel.exportBackupJson()
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(json.toByteArray(Charsets.UTF_8))
+                    }
+                    Toast.makeText(context, "تم حفظ ملف النسخة الاحتياطية بنجاح", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(context, "تعذر حفظ الملف: ${e.localizedMessage ?: ""}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    val openBackupFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            coroutineScope.launch {
+                try {
+                    val json = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                    val success = viewModel.importBackupJson(json)
+                    importFeedback = if (success) {
+                        Toast.makeText(context, "تمت استعادة البيانات من الملف بنجاح", Toast.LENGTH_SHORT).show()
+                        true to "تمت استعادة المفضلة والإشارات ومواضع القراءة بنجاح."
+                    } else {
+                        Toast.makeText(context, "ملف النسخة غير صالح أو تالف", Toast.LENGTH_LONG).show()
+                        false to "ملف النسخة غير صالح أو يفتقد الحقول المطلوبة."
+                    }
+                } catch (e: Exception) {
+                    importFeedback = false to "تعذر قراءة الملف المحدد."
+                }
+            }
+        }
+    }
 
     LazyColumn(
         modifier = modifier
@@ -113,7 +149,7 @@ fun DeveloperScreen(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "لوحة المطور والخدمات المتقدمة",
+                            text = "لوحة المطور والإعدادات المتقدمة",
                             style = MaterialTheme.typography.titleLarge.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onPrimary
@@ -122,7 +158,7 @@ fun DeveloperScreen(
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "إدارة القراء المخصصين، التذكيرات المجدولة، النسخ الاحتياطي، وهندسة الخدمات السحابية والإعلانية وفق أعلى معايير الاستقرار.",
+                        text = "إدارة القراء المخصصين، تذكير يوم الجمعة المحلي، والنسخ الاحتياطي الشامل للبيانات على جهازك.",
                         style = MaterialTheme.typography.bodySmall.copy(
                             color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f),
                             fontSize = 12.sp
@@ -173,14 +209,14 @@ fun DeveloperScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "يمكنك إضافة قراء إضافيين بروابط خوادمهم الصوتية، وتُحفظ البيانات محلياً في قاعدة البيانات وتظل متوفرة بعد إعادة تشغيل التطبيق.",
+                        text = "يمكنك إضافة قراء إضافيين بروابط HTTPS لخوادمهم الصوتية، وتُحفظ البيانات محلياً في قاعدة Room وتستعاد تلقائياً بعد إعادة التشغيل.",
                         style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
                     )
 
                     if (customReciters.isEmpty()) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "لا يوجد قراء مخصصون حالياً. القراء الـ9 الأساسيون متوفرون في تبويب القراء.",
+                            text = "لا يوجد قراء مخصصون حالياً. القراء الـ8 الأساسيون متوفرون في تبويب القراء.",
                             style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.outline)
                         )
                     } else {
@@ -265,7 +301,7 @@ fun DeveloperScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "جدولة تنبيه أسبوعي صباح يوم الجمعة المباركة للتذكير بالاستماع إلى سورة الكهف الشريفة وقراءتها.",
+                        text = "جدولة تنبيه محلي أسبوعي صباح يوم الجمعة (9:00 صباحاً) عبر AlarmManager للتذكير بسورة الكهف دون الحاجة لخادم خارجي.",
                         style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
                     )
 
@@ -310,7 +346,7 @@ fun DeveloperScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "تصدير الإشارات المرجعية ومواضع الاستماع والقراء المخصصين إلى ملف JSON واستعادتها بسهولة عند تغيير الجهاز أو إعادة التثبيت.",
+                        text = "يشمل النسخ الاحتياطي (JSON v2): المفضلة، الإشارات المرجعية وملاحظاتها، مواضع الاستماع لكل قارئ، والقراء المخصصين، مع الدمج الآمن داخل معاملة واحدة.",
                         style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
                     )
 
@@ -320,25 +356,71 @@ fun DeveloperScreen(
                             onClick = {
                                 coroutineScope.launch {
                                     val json = viewModel.exportBackupJson()
-                                    backupJsonDialog = json
                                     clipboardManager.setText(AnnotatedString(json))
-                                    Toast.makeText(context, "تم نسخ بيانات النسخة الاحتياطية إلى الحافظة", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "تم نسخ النسخة الاحتياطية إلى الحافظة", Toast.LENGTH_SHORT).show()
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.testTag("export_backup_btn")
                         ) {
-                            Text("تصدير ونسخ النسخة")
+                            Text("نسخ JSON")
                         }
 
+                        OutlinedButton(
+                            onClick = { createBackupFileLauncher.launch("quran_audio_backup.json") },
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("حفظ كملف")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                coroutineScope.launch {
+                                    val json = viewModel.exportBackupJson()
+                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "application/json"
+                                        putExtra(Intent.EXTRA_SUBJECT, "نسخة احتياطية - القرآن الصوتي")
+                                        putExtra(Intent.EXTRA_TEXT, json)
+                                    }
+                                    context.startActivity(Intent.createChooser(shareIntent, "مشاركة النسخة الاحتياطية"))
+                                }
+                            },
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = { showImportField = !showImportField },
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.testTag("toggle_import_btn")
                         ) {
-                            Text("استعادة نسخة")
+                            Text("استعادة من نص JSON")
                         }
+
+                        OutlinedButton(
+                            onClick = { openBackupFileLauncher.launch(arrayOf("application/json", "text/*", "*/*")) },
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("استيراد من ملف")
+                        }
+                    }
+
+                    importFeedback?.let { (success, message) ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = message,
+                            color = if (success) EmeraldLight else MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold)
+                        )
                     }
 
                     if (showImportField) {
@@ -359,10 +441,12 @@ fun DeveloperScreen(
                                 coroutineScope.launch {
                                     val success = viewModel.importBackupJson(importJsonText)
                                     if (success) {
+                                        importFeedback = true to "تمت استعادة البيانات بنجاح."
                                         Toast.makeText(context, "تمت استعادة البيانات بنجاح", Toast.LENGTH_SHORT).show()
                                         showImportField = false
                                         importJsonText = ""
                                     } else {
+                                        importFeedback = false to "فشل استيراد النسخة: تنسيق JSON أو الحقول غير صالحة."
                                         Toast.makeText(context, "فشل استيراد النسخة: تنسيق JSON غير صالح", Toast.LENGTH_LONG).show()
                                     }
                                 }
@@ -377,7 +461,7 @@ fun DeveloperScreen(
             }
         }
 
-        // Section 4: Cloud Architecture & Backend Readiness Hub
+        // Section 4: Truthful Local Architecture Info
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -387,29 +471,23 @@ fun DeveloperScreen(
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Default.CloudQueue,
+                            imageVector = Icons.Default.Info,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(22.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "بنية الخدمات السحابية والإشعارات المركزية",
+                            text = "البنية التقنية للتطبيق",
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                         )
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "حرصاً على الشفافية والأمان، تم بناء التطبيق بهندسة نظيفة جاهزة للربط السحابي:",
-                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold)
-                    )
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "1. إدارة القراء السحابية: تتطلب تفعيل Firebase Firestore مع تطبيق قواعد Zero-Trust Security Rules وتوثيق هوية المشرف عبر Google Sign-In أو Firebase Admin SDK.\n" +
-                               "2. الإشعارات المركزية (Push): تتطلب مفتاح FCM (Firebase Cloud Messaging) وحساب خدمة Google Cloud لإرسال الرسائل عبر خادم آمن دون تخزين مفاتيح حساسة في التطبيق.\n" +
-                               "3. حفظ المزامنة السحابية: مهيأة للربط بمكتبة Cloud Sync المضمنة دون فقدان التخزين المحلي السريع في Room.",
+                        text = "• التخزين المحلي: يعمل التطبيق بقاعدة بيانات Room (الإصدار 2) لحفظ المفضلة، الإشارات، السور المنزلة، والقراء المخصصين محلياً دون خوادم خارجية.\n" +
+                               "• التلاوة والصوتيات: يعتمد على MediaPlayer وMediaSessionCompat ضمن خدمة الخلفية QuranAudioService مع دعم التنزيل دون اتصال عبر OkHttp.\n" +
+                               "• التذكيرات: تُجدول إشعارات سورة الكهف محلياً يوم الجمعة عبر AlarmManager.",
                         style = MaterialTheme.typography.bodySmall.copy(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             lineHeight = 18.sp
@@ -419,7 +497,7 @@ fun DeveloperScreen(
             }
         }
 
-        // Section 5: Google AdMob Integration & Safe Policy
+        // Section 5: Truthful AdMob Policy & App Identity
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -436,16 +514,16 @@ fun DeveloperScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "جاهزية Google AdMob واحترام تلاوة القرآن",
+                            text = "سياسة الإعلانات وهوية التطبيق",
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                         )
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "• فصل معرفات الاختبار عن الإنتاج: يتم حقن معرفات AdMob الحقيقية عبر BuildConfig وملف .env الآمن في لوحة الأسرار.\n" +
-                               "• عدم قطع التلاوة إطلاقاً: وضعت قاعدة برمجية صارمة تمنع ظهور أي إعلانات بينية (Interstitial) أثناء تشغيل الصوت القرآني احتراماً لقدسية كتاب الله تعالى ولراحة المستمع.\n" +
-                               "• معرف التطبيق الثابت: com.aistudio.quranaudio.yqtnzp لحفظ التحديثات التراكمية وسجلات التوقيع.",
+                        text = "• التحقق من الموافقة أولاً: لا تُطلب إعلانات Google AdMob إلا بعد التحقق من حالة موافقة المستخدم (UMP) وتوفر الاتصال بالإنترنت.\n" +
+                               "• عدم مقاطعة التلاوة الجارية: الإعلان البيني مقيد بضوابط التكرار ولا يظهر أثناء تشغيل نفس السورة.\n" +
+                               "• معرف التطبيق الثابت: com.aistudio.quranaudio.yqtnzp.",
                         style = MaterialTheme.typography.bodySmall.copy(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             lineHeight = 18.sp

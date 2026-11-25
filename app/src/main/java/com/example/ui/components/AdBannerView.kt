@@ -1,23 +1,13 @@
 package com.example.ui.components
 
-import android.content.Context
 import android.util.Log
-import android.view.View
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -26,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,27 +26,22 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.ads.AdBannerDiagnosticListener
 import com.example.ads.AdConfig
 import com.example.ads.ConsentManager
-import com.google.android.gms.ads.AdListener
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import com.google.android.gms.ads.LoadAdError
+import kotlinx.coroutines.delay
 
 private const val TAG = "AdBannerLifecycle"
 private const val DIAGNOSTIC_TAG = "AdBannerDiagnostic"
+private const val MAX_BANNER_RETRIES = 3
 
-/**
- * Diagnostic log function to track and output AdMob SDK's lifecycle events
- * (onAdLoaded, onAdFailedToLoad, onAdOpened, onAdClosed, onAdImpression) to Logcat.
- */
 fun logAdBannerLifecycleEvent(
     event: String,
     details: String = "",
@@ -79,9 +65,6 @@ fun logAdBannerLifecycleEvent(
     return message
 }
 
-/**
- * Verifies whether the banner container is receiving a non-zero height constraint during the layout phase.
- */
 fun verifyBannerLayoutConstraints(
     minHeightPx: Int,
     maxHeightPx: Int,
@@ -103,10 +86,6 @@ fun verifyBannerLayoutConstraints(
     return isNonZero
 }
 
-/**
- * Diagnostic function to analyze, verify, and log AdBanner state, loading flags,
- * and container dimensions in real time.
- */
 fun logAdBannerDiagnostics(
     isAdLoaded: Boolean,
     isAdsReady: Boolean,
@@ -150,18 +129,6 @@ fun logAdBannerDiagnostics(
     return report
 }
 
-/**
- * Jetpack Compose wrapper for Google AdMob Adaptive Banner Ad with comprehensive lifecycle event logging
- * and layout-phase constraint verification.
- *
- * Guarantees:
- * - Fixed reserved height matching AdMob Anchored Adaptive Banner spec (Modifier.height & defaultMinSize).
- * - Direct layout-phase constraint inspection via Modifier.layout and verifyBannerLayoutConstraints.
- * - Real-time lifecycle logging for onAdLoaded, onAdFailedToLoad, onAdOpened, onAdClosed, onAdImpression.
- * - Never collapses to 0dp; displays a sleek placeholder frame while waiting for live ad fill.
- * - AdView is always attached to the view hierarchy so Android and WebView can measure and render reliably.
- * - Completely safe from audio playback interference and main thread blocking.
- */
 @Composable
 fun AdBannerView(
     modifier: Modifier = Modifier
@@ -172,10 +139,11 @@ fun AdBannerView(
     val density = LocalDensity.current.density
 
     var isAdLoaded by remember { mutableStateOf(false) }
+    var failedAttempts by remember { mutableIntStateOf(0) }
+    var retryTrigger by remember { mutableIntStateOf(0) }
     var measuredWidthPx by remember { mutableIntStateOf(0) }
     var measuredHeightPx by remember { mutableIntStateOf(0) }
 
-    // Adaptive banner ad size calculation per official Google recommendations
     val adSize = remember(screenWidth) {
         AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(context, screenWidth)
     }
@@ -185,16 +153,18 @@ fun AdBannerView(
     }
 
     val isAdsReady by ConsentManager.isAdsReady.collectAsState()
+    val currentAdsReady by rememberUpdatedState(isAdsReady)
 
     val diagnosticListener = remember(context, density, bannerHeight) {
         AdBannerDiagnosticListener(
             adUnitId = AdConfig.BANNER_AD_UNIT_ID,
             onAdLoadedCallback = {
                 isAdLoaded = true
+                failedAttempts = 0
                 logAdBannerLifecycleEvent("onAdLoaded", "Banner ad loaded successfully and visible in layout.")
                 logAdBannerDiagnostics(
                     isAdLoaded = true,
-                    isAdsReady = isAdsReady,
+                    isAdsReady = currentAdsReady,
                     canRequestAds = ConsentManager.canRequestAds(context),
                     isNetworkAvailable = ConsentManager.isNetworkAvailable(context),
                     adUnitId = AdConfig.BANNER_AD_UNIT_ID,
@@ -206,10 +176,11 @@ fun AdBannerView(
             },
             onAdFailedCallback = { error ->
                 isAdLoaded = false
-                logAdBannerLifecycleEvent("onAdFailedToLoad", "AdMob returned load failure.", error)
+                failedAttempts++
+                logAdBannerLifecycleEvent("onAdFailedToLoad", "AdMob returned load failure (attempt $failedAttempts).", error)
                 logAdBannerDiagnostics(
                     isAdLoaded = false,
-                    isAdsReady = isAdsReady,
+                    isAdsReady = currentAdsReady,
                     canRequestAds = ConsentManager.canRequestAds(context),
                     isNetworkAvailable = ConsentManager.isNetworkAvailable(context),
                     adUnitId = AdConfig.BANNER_AD_UNIT_ID,
@@ -236,8 +207,18 @@ fun AdBannerView(
         }
     }
 
-    // Trigger ad load strictly when MobileAds is initialized AND consent is granted
-    LaunchedEffect(isAdsReady) {
+    // Retry with backoff when transient failure occurs
+    LaunchedEffect(failedAttempts, isAdsReady) {
+        if (!isAdLoaded && failedAttempts in 1..MAX_BANNER_RETRIES && isAdsReady) {
+            delay(15_000L * failedAttempts)
+            if (!isAdLoaded && ConsentManager.canRequestAds(context) && ConsentManager.isNetworkAvailable(context)) {
+                retryTrigger++
+            }
+        }
+    }
+
+    // Trigger ad load when MobileAds is initialized AND consent + network allow
+    LaunchedEffect(isAdsReady, retryTrigger) {
         val canRequest = ConsentManager.canRequestAds(context)
         val networkAvailable = ConsentManager.isNetworkAvailable(context)
         if (isAdsReady && canRequest && networkAvailable) {
@@ -255,17 +236,6 @@ fun AdBannerView(
                         "canRequestAds=$canRequest, isNetworkAvailable=$networkAvailable)"
             )
         }
-        logAdBannerDiagnostics(
-            isAdLoaded = isAdLoaded,
-            isAdsReady = isAdsReady,
-            canRequestAds = ConsentManager.canRequestAds(context),
-            isNetworkAvailable = ConsentManager.isNetworkAvailable(context),
-            adUnitId = AdConfig.BANNER_AD_UNIT_ID,
-            targetHeightDp = bannerHeight,
-            measuredWidthPx = measuredWidthPx,
-            measuredHeightPx = measuredHeightPx,
-            density = density
-        )
     }
 
     DisposableEffect(adView) {
@@ -275,7 +245,15 @@ fun AdBannerView(
         }
     }
 
-    // Stable banner container with layout-phase constraint verification
+    val canRequest = ConsentManager.canRequestAds(context)
+    val networkAvailable = ConsentManager.isNetworkAvailable(context)
+    val shouldOccupySpace = isAdLoaded || (isAdsReady && canRequest && networkAvailable && failedAttempts <= MAX_BANNER_RETRIES)
+
+    if (!shouldOccupySpace) {
+        // Collapse blank gap cleanly when consent denied, offline, or exhausted retries
+        return
+    }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -283,7 +261,6 @@ fun AdBannerView(
             .heightIn(min = 50.dp, max = 80.dp)
             .defaultMinSize(minHeight = bannerHeight)
             .layout { measurable, constraints ->
-                // Measure the layout during the layout phase and verify constraints
                 val placeable = measurable.measure(constraints)
                 verifyBannerLayoutConstraints(
                     minHeightPx = constraints.minHeight,
@@ -299,25 +276,11 @@ fun AdBannerView(
             .onSizeChanged { size ->
                 measuredWidthPx = size.width
                 measuredHeightPx = size.height
-                logAdBannerDiagnostics(
-                    isAdLoaded = isAdLoaded,
-                    isAdsReady = isAdsReady,
-                    canRequestAds = ConsentManager.canRequestAds(context),
-                    isNetworkAvailable = ConsentManager.isNetworkAvailable(context),
-                    adUnitId = AdConfig.BANNER_AD_UNIT_ID,
-                    targetHeightDp = bannerHeight,
-                    measuredWidthPx = size.width,
-                    measuredHeightPx = size.height,
-                    density = density
-                )
             }
             .background(MaterialTheme.colorScheme.surface)
             .testTag("admob_banner_container"),
         contentAlignment = Alignment.Center
     ) {
-        // AdView is always attached to the hierarchy with explicit height matching the container.
-        // The container reserves the exact layout height (50dp min) so the UI remains stable,
-        // without displaying placeholder or diagnostic text to the user while waiting for ad fill.
         AndroidView(
             factory = { adView },
             modifier = Modifier

@@ -123,6 +123,11 @@ object InterstitialAdManager {
             return
         }
 
+        if (activity.isFinishing || activity.isDestroyed) {
+            safeProceed()
+            return
+        }
+
         ad.fullScreenContentCallback = object : FullScreenContentCallback() {
             override fun onAdDismissedFullScreenContent() {
                 Log.i(TAG, "Interstitial ad dismissed by user.")
@@ -157,6 +162,14 @@ object InterstitialAdManager {
         }
 
         isShowing = true
-        ad.show(activity)
+        try {
+            ad.show(activity)
+        } catch (e: Exception) {
+            Log.e(TAG, "Interstitial ad.show threw exception: ${e.message}", e)
+            interstitialAd = null
+            isShowing = false
+            loadAd(activity)
+            safeProceed()
+        }
     }
 }

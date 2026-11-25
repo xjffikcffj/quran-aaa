@@ -26,6 +26,7 @@ data class PlayerState(
     val currentReciter: Reciter? = null,
     val currentPositionMs: Long = 0L,
     val totalDurationMs: Long = 0L,
+    val playbackSpeed: Float = 1.0f,
     val repeatMode: RepeatMode = RepeatMode.ALL,
     val sleepTimerOption: SleepTimerOption = SleepTimerOption.OFF,
     val sleepTimerSecondsRemaining: Long = 0L,

@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
 import com.example.data.local.QuranDatabase
+import com.example.download.DownloadManager
 
 class QuranApp : Application() {
 
@@ -19,6 +20,7 @@ class QuranApp : Application() {
     override fun onCreate() {
         super.onCreate()
         database = QuranDatabase.getDatabase(this)
+        DownloadManager.getInstance(this).recoverStuckDownloads()
         createNotificationChannels()
     }
 

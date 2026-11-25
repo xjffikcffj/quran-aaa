@@ -127,6 +127,7 @@ object ConsentManager {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "MobileAds background initialization encountered an error: ${e.message}", e)
+                isMobileAdsInitializeCalled.set(false)
                 CoroutineScope(Dispatchers.Main).launch {
                     _isAdsReady.value = false
                 }

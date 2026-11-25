@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,8 +42,10 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -52,12 +55,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
@@ -66,6 +72,7 @@ import com.example.model.RepeatMode
 import com.example.model.SleepTimerOption
 import com.example.ui.theme.EmeraldLight
 import com.example.ui.theme.GoldAccent
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,6 +85,7 @@ fun FullPlayerBottomSheet(
     onPrevClick: () -> Unit,
     onSeek: (Long) -> Unit,
     onToggleRepeat: () -> Unit,
+    onCycleSpeed: () -> Unit = {},
     onOpenSleepTimer: () -> Unit,
     onOpenAddBookmark: () -> Unit,
     onDownloadClick: () -> Unit,
@@ -100,10 +108,10 @@ fun FullPlayerBottomSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 24.dp)
-                .padding(bottom = 32.dp),
+                .padding(bottom = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Header Top Bar: Title & Close Button
+            // Header Top Bar: Close Button, Title & Sleep Timer
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -128,7 +136,6 @@ fun FullPlayerBottomSheet(
                     )
                 )
 
-                // Sleep Timer badge button
                 Box {
                     IconButton(
                         onClick = onOpenSleepTimer,
@@ -151,7 +158,7 @@ fun FullPlayerBottomSheet(
                                 .padding(2.dp)
                         ) {
                             Text(
-                                text = String.format("%02d:%02d", mins, secs),
+                                text = String.format(Locale.US, "%02d:%02d", mins, secs),
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontSize = 8.sp,
                                     fontWeight = FontWeight.Bold,
@@ -164,13 +171,13 @@ fun FullPlayerBottomSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Decorative Quran Hero Art Card
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(180.dp)
+                    .height(165.dp)
                     .shadow(12.dp, RoundedCornerShape(22.dp))
                     .clip(RoundedCornerShape(22.dp))
                     .border(1.5.dp, GoldAccent.copy(alpha = 0.5f), RoundedCornerShape(22.dp))
@@ -182,13 +189,12 @@ fun FullPlayerBottomSheet(
                     contentScale = ContentScale.Crop
                 )
 
-                // Gradient Overlay with Surah Badge
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.BottomCenter)
                         .background(
-                            androidx.compose.ui.graphics.Brush.verticalGradient(
+                            Brush.verticalGradient(
                                 colors = listOf(Color.Transparent, Color(0xCC064E3B))
                             )
                         )
@@ -216,14 +222,13 @@ fun FullPlayerBottomSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Surah Name in Grand Arabic Typography
             Text(
                 text = "سورة ${surah.name}",
                 style = MaterialTheme.typography.headlineMedium.copy(
                     fontWeight = FontWeight.ExtraBold,
-                    fontSize = 28.sp,
+                    fontSize = 26.sp,
                     color = MaterialTheme.colorScheme.primary
                 ),
                 textAlign = TextAlign.Center
@@ -231,7 +236,6 @@ fun FullPlayerBottomSheet(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // Reciter & Offline Indicator
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center
@@ -273,7 +277,7 @@ fun FullPlayerBottomSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Audio Seeker Slider
             val sliderValue = if (isDraggingSlider) {
@@ -314,7 +318,6 @@ fun FullPlayerBottomSheet(
                     .testTag("player_seek_slider")
             )
 
-            // Timestamps: Current / Total
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -333,15 +336,114 @@ fun FullPlayerBottomSheet(
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Main Playback Controls
+            // Primary Transport Controls in fixed physical LTR layout so directional triangles always match:
+            // |◀ (SkipPrevious = Previous Surah), ◀◀ (FastRewind = -10s), Play/Pause, ▶▶ (FastForward = +10s), ▶| (SkipNext = Next Surah)
+            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Triangle left with bar -> Previous Surah
+                    IconButton(
+                        onClick = onPrevClick,
+                        modifier = Modifier
+                            .size(46.dp)
+                            .testTag("player_prev_surah")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SkipPrevious,
+                            contentDescription = "السورة السابقة",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+
+                    // Two triangles left -> Rewind inside current surah (-10s)
+                    IconButton(
+                        onClick = { onSeek((playerState.currentPositionMs - 10_000L).coerceAtLeast(0L)) },
+                        modifier = Modifier
+                            .size(44.dp)
+                            .testTag("player_rewind_10s")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FastRewind,
+                            contentDescription = "التأخير داخل التسجيل 10 ثواني",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+
+                    // Center Play/Pause FAB (tapping while buffering cancels stuck buffering)
+                    FloatingActionButton(
+                        onClick = onPlayPauseClick,
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        shape = CircleShape,
+                        modifier = Modifier
+                            .size(66.dp)
+                            .testTag("player_play_pause_fab")
+                    ) {
+                        if (playerState.isBuffering) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(28.dp),
+                                strokeWidth = 3.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = if (playerState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (playerState.isPlaying) "إيقاف مؤقت" else "تشغيل",
+                                modifier = Modifier.size(34.dp)
+                            )
+                        }
+                    }
+
+                    // Two triangles right -> Fast Forward inside current surah (+10s)
+                    IconButton(
+                        onClick = {
+                            val maxDur = if (playerState.totalDurationMs > 0L) playerState.totalDurationMs else Long.MAX_VALUE
+                            onSeek((playerState.currentPositionMs + 10_000L).coerceAtMost(maxDur))
+                        },
+                        modifier = Modifier
+                            .size(44.dp)
+                            .testTag("player_forward_10s")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FastForward,
+                            contentDescription = "التقديم داخل التسجيل 10 ثواني",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+
+                    // Triangle right with bar -> Next Surah
+                    IconButton(
+                        onClick = onNextClick,
+                        modifier = Modifier
+                            .size(46.dp)
+                            .testTag("player_next_surah")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SkipNext,
+                            contentDescription = "السورة التالية",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Secondary Action Strip: Repeat Mode, Playback Speed, Add Bookmark
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Repeat Mode Toggle
                 IconButton(
                     onClick = onToggleRepeat,
                     modifier = Modifier.testTag("toggle_repeat_mode")
@@ -358,92 +460,30 @@ fun FullPlayerBottomSheet(
                             RepeatMode.ONE -> GoldAccent
                             RepeatMode.ALL -> MaterialTheme.colorScheme.primary
                         },
-                        modifier = Modifier.size(26.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
 
-                // Previous Surah
-                IconButton(
-                    onClick = onPrevClick,
-                    modifier = Modifier
-                        .size(46.dp)
-                        .testTag("player_prev_surah")
+                TextButton(
+                    onClick = onCycleSpeed,
+                    modifier = Modifier.testTag("player_speed_btn")
                 ) {
                     Icon(
-                        imageVector = Icons.Default.SkipPrevious,
-                        contentDescription = "السورة السابقة",
-                        tint = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.size(32.dp)
+                        imageVector = Icons.Default.Speed,
+                        contentDescription = "سرعة القراءة",
+                        tint = if (playerState.playbackSpeed != 1.0f) GoldAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
                     )
-                }
-
-                // Rewind 10s
-                IconButton(
-                    onClick = { onSeek((playerState.currentPositionMs - 10000L).coerceAtLeast(0L)) },
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.FastRewind,
-                        contentDescription = "تقديم 10 ثواني للخلف",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(26.dp)
-                    )
-                }
-
-                // Big Center Play/Pause FAB
-                FloatingActionButton(
-                    onClick = { if (!playerState.isBuffering) onPlayPauseClick() },
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                    shape = CircleShape,
-                    modifier = Modifier
-                        .size(68.dp)
-                        .testTag("player_play_pause_fab")
-                ) {
-                    if (playerState.isBuffering) {
-                        CircularProgressIndicator(
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(30.dp),
-                            strokeWidth = 3.dp
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "${formatSpeed(playerState.playbackSpeed)}x",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = if (playerState.playbackSpeed != 1.0f) GoldAccent else MaterialTheme.colorScheme.onSurface
                         )
-                    } else {
-                        Icon(
-                            imageVector = if (playerState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (playerState.isPlaying) "إيقاف مؤقت" else "تشغيل",
-                            modifier = Modifier.size(36.dp)
-                        )
-                    }
-                }
-
-                // Forward 10s
-                IconButton(
-                    onClick = { onSeek((playerState.currentPositionMs + 10000L).coerceAtMost(playerState.totalDurationMs)) },
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.FastForward,
-                        contentDescription = "تقديم 10 ثواني للأمام",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(26.dp)
                     )
                 }
 
-                // Next Surah
-                IconButton(
-                    onClick = onNextClick,
-                    modifier = Modifier
-                        .size(46.dp)
-                        .testTag("player_next_surah")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.SkipNext,
-                        contentDescription = "السورة التالية",
-                        tint = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.size(32.dp)
-                    )
-                }
-
-                // Bookmark Button
                 IconButton(
                     onClick = onOpenAddBookmark,
                     modifier = Modifier.testTag("player_add_bookmark")
@@ -452,12 +492,12 @@ fun FullPlayerBottomSheet(
                         imageVector = Icons.Default.BookmarkAdd,
                         contentDescription = "إضافة إشارة مرجعية",
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(26.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Download Status / Trigger Row
             Row(
@@ -505,9 +545,17 @@ fun FullPlayerBottomSheet(
     }
 }
 
+private fun formatSpeed(speed: Float): String {
+    return if (speed % 1.0f == 0f) {
+        String.format(Locale.US, "%.1f", speed)
+    } else {
+        String.format(Locale.US, "%.2f", speed).trimEnd('0')
+    }
+}
+
 private fun formatMs(ms: Long): String {
     val totalSeconds = (ms / 1000).coerceAtLeast(0L)
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
-    return String.format("%02d:%02d", minutes, seconds)
+    return String.format(Locale.US, "%02d:%02d", minutes, seconds)
 }

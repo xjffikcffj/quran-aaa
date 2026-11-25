@@ -36,4 +36,7 @@ interface DownloadDao {
 
     @Query("DELETE FROM downloads WHERE id = :id")
     suspend fun deleteById(id: String)
+
+    @Query("UPDATE downloads SET status = 'FAILED', errorMessage = :errorMessage WHERE status = 'DOWNLOADING'")
+    suspend fun markStuckDownloadsFailed(errorMessage: String)
 }

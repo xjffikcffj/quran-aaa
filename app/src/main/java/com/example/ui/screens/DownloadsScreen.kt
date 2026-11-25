@@ -48,6 +48,7 @@ import com.example.data.DefaultReciters
 import com.example.data.QuranData
 import com.example.model.DownloadItem
 import com.example.model.DownloadStatus
+import com.example.model.Reciter
 import com.example.ui.theme.EmeraldLight
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.GoldAccent
@@ -59,6 +60,7 @@ fun DownloadsScreen(
     modifier: Modifier = Modifier
 ) {
     val downloads by viewModel.downloads.collectAsState()
+    val reciters by viewModel.reciters.collectAsState()
 
     Column(
         modifier = modifier
@@ -144,13 +146,20 @@ fun DownloadsScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(downloads, key = { it.id }) { item ->
+                    val itemReciter = reciters.firstOrNull { it.id == item.reciterId }
+                        ?: DefaultReciters.list.firstOrNull { it.id == item.reciterId }
                     DownloadCard(
                         item = item,
                         onPlayClick = {
                             val surah = QuranData.getSurahById(item.surahNumber)
                             if (surah != null) {
-                                val reciter = DefaultReciters.getReciterById(item.reciterId)
-                                viewModel.selectReciter(reciter)
+                                val resolvedReciter = itemReciter ?: Reciter(
+                                    id = item.reciterId,
+                                    name = item.reciterName,
+                                    serverUrl = "",
+                                    isCustom = true
+                                )
+                                viewModel.selectReciter(resolvedReciter)
                                 viewModel.playSurah(surah)
                             }
                         },
@@ -158,8 +167,8 @@ fun DownloadsScreen(
                         onDeleteClick = { viewModel.deleteDownload(item.id) },
                         onRetryClick = {
                             val surah = QuranData.getSurahById(item.surahNumber)
-                            if (surah != null) {
-                                viewModel.startDownload(surah)
+                            if (surah != null && itemReciter != null) {
+                                viewModel.startDownload(itemReciter, surah)
                             }
                         }
                     )

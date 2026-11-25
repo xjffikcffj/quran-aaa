@@ -21,12 +21,14 @@ import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
 import androidx.media.session.MediaButtonReceiver
 import com.example.MainActivity
 import com.example.QuranApp
 import com.example.R
 import com.example.model.PlayerState
+import com.example.model.SleepTimerOption
 import com.example.player.PlayerManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,17 +36,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.util.Locale
+import kotlin.math.abs
 
-/**
- * Foreground Audio Service for Quran playback with MediaSessionCompat and MediaStyle notifications.
- *
- * Guarantees:
- * - Full system lockscreen controls (Play, Pause, Skip Next, Skip Previous, Seekbar).
- * - Compact view actions in the notification shade (Actions 0, 1, 2).
- * - Automatic pause when headphones/Bluetooth are disconnected (ACTION_AUDIO_BECOMING_NOISY).
- * - Real-time synchronization between PlayerManager, MediaSession, and UI ViewModel.
- * - Rich lockscreen album art presentation.
- */
 class QuranAudioService : Service() {
 
     companion object {
@@ -67,7 +61,14 @@ class QuranAudioService : Service() {
     private var mediaSession: MediaSessionCompat? = null
     private var cachedAlbumArt: Bitmap? = null
 
-    // Handles automatic pause when headphones/Bluetooth disconnect
+    // Caching keys to prevent redundant PlaybackStateCompat/notification resets every 1s
+    private var lastMetadataKey: String? = null
+    private var lastPlaybackKey: String? = null
+    private var lastSyncedPosMs: Long = -1L
+    private var lastSyncedElapsedMs: Long = -1L
+    private var lastSyncedSpeed: Float = 0f
+    private var lastNotificationKey: String? = null
+
     private var isNoisyReceiverRegistered = false
     private val becomingNoisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -83,7 +84,6 @@ class QuranAudioService : Service() {
         super.onCreate()
         val playerManager = PlayerManager.getInstance(this)
 
-        // Initialize MediaButtonReceiver PendingIntent for hardware and lockscreen media buttons
         val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON, null, this, MediaButtonReceiver::class.java)
         val mediaButtonPendingIntent = PendingIntent.getBroadcast(
             this,
@@ -92,7 +92,6 @@ class QuranAudioService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Initialize MediaSessionCompat for system notification and background media control
         mediaSession = MediaSessionCompat(this, "QuranAudioMediaSession").apply {
             setMediaButtonReceiver(mediaButtonPendingIntent)
             setCallback(object : MediaSessionCompat.Callback() {
@@ -130,7 +129,7 @@ class QuranAudioService : Service() {
                 }
 
                 override fun onStop() {
-                    playerManager.stop()
+                    playerManager.stop(notifyService = false)
                     stopPlaybackService()
                 }
 
@@ -142,7 +141,6 @@ class QuranAudioService : Service() {
             isActive = true
         }
 
-        // Real-time synchronization: collect PlayerManager state and reflect into MediaSession & Notification
         serviceScope.launch {
             playerManager.playerState.collectLatest { state ->
                 syncMediaSessionState(state)
@@ -174,7 +172,6 @@ class QuranAudioService : Service() {
         val playerManager = PlayerManager.getInstance(this)
 
         if (intent == null) {
-            // Android OS restarted the service after process death
             if (!playerManager.playerState.value.isPlaying) {
                 stopPlaybackService()
                 return START_NOT_STICKY
@@ -199,13 +196,13 @@ class QuranAudioService : Service() {
                 playerManager.seekTo(target)
             }
             ACTION_STOP -> {
-                playerManager.stop()
+                playerManager.stop(notifyService = false)
                 stopPlaybackService()
                 return START_NOT_STICKY
             }
             ACTION_UPDATE_STATUS, ACTION_PAUSE_STATUS -> {
-                syncMediaSessionState(playerManager.playerState.value)
-                syncNotificationWithState(playerManager.playerState.value)
+                syncMediaSessionState(playerManager.playerState.value, forceUpdate = true)
+                syncNotificationWithState(playerManager.playerState.value, forceUpdate = true)
             }
         }
 
@@ -216,7 +213,12 @@ class QuranAudioService : Service() {
         if (!isNoisyReceiverRegistered) {
             try {
                 val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
-                registerReceiver(becomingNoisyReceiver, filter)
+                ContextCompat.registerReceiver(
+                    this,
+                    becomingNoisyReceiver,
+                    filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
                 isNoisyReceiverRegistered = true
             } catch (_: Exception) {}
         }
@@ -232,65 +234,93 @@ class QuranAudioService : Service() {
     }
 
     /**
-     * Synchronizes MediaSessionCompat state and metadata with the active recitation.
+     * Updates MediaSession metadata & PlaybackStateCompat only on state transitions or genuine position seeks
+     * so SystemUI does not reset/jump the notification progress seekbar every second.
      */
-    private fun syncMediaSessionState(state: PlayerState) {
+    private fun syncMediaSessionState(state: PlayerState, forceUpdate: Boolean = false) {
         val session = mediaSession ?: return
         val surah = state.currentSurah
         val reciter = state.currentReciter
 
-        // Configure transport controls and live playback progress for lockscreen seekbar
-        val playbackState = PlaybackStateCompat.Builder()
-            .setActions(
-                PlaybackStateCompat.ACTION_PLAY or
-                PlaybackStateCompat.ACTION_PAUSE or
-                PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                PlaybackStateCompat.ACTION_FAST_FORWARD or
-                PlaybackStateCompat.ACTION_REWIND or
-                PlaybackStateCompat.ACTION_SEEK_TO or
-                PlaybackStateCompat.ACTION_STOP
-            )
-            .setState(
-                when {
-                    state.isPlaying -> PlaybackStateCompat.STATE_PLAYING
-                    state.isBuffering -> PlaybackStateCompat.STATE_BUFFERING
-                    else -> PlaybackStateCompat.STATE_PAUSED
-                },
-                state.currentPositionMs,
-                if (state.isPlaying) 1.0f else 0.0f,
-                SystemClock.elapsedRealtime()
-            )
-            .build()
-        session.setPlaybackState(playbackState)
+        val playbackCode = when {
+            state.isPlaying -> PlaybackStateCompat.STATE_PLAYING
+            state.isBuffering -> PlaybackStateCompat.STATE_BUFFERING
+            else -> PlaybackStateCompat.STATE_PAUSED
+        }
+        val speed = if (state.isPlaying) state.playbackSpeed else 0.0f
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val playbackKey = "${surah?.id}_${reciter?.id}_${playbackCode}_${speed}"
+
+        // Calculate extrapolated position from last sync to distinguish smooth playback ticks from explicit seeks
+        val expectedPosMs = if (lastSyncedPosMs >= 0L && lastSyncedElapsedMs >= 0L && lastSyncedSpeed > 0f) {
+            lastSyncedPosMs + ((nowElapsed - lastSyncedElapsedMs) * lastSyncedSpeed).toLong()
+        } else {
+            lastSyncedPosMs
+        }
+        val positionJumped = lastSyncedPosMs < 0L || abs(state.currentPositionMs - expectedPosMs) > 2000L
+
+        if (forceUpdate || playbackKey != lastPlaybackKey || positionJumped) {
+            val playbackState = PlaybackStateCompat.Builder()
+                .setActions(
+                    PlaybackStateCompat.ACTION_PLAY or
+                    PlaybackStateCompat.ACTION_PAUSE or
+                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                    PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                    PlaybackStateCompat.ACTION_FAST_FORWARD or
+                    PlaybackStateCompat.ACTION_REWIND or
+                    PlaybackStateCompat.ACTION_SEEK_TO or
+                    PlaybackStateCompat.ACTION_STOP
+                )
+                .setState(playbackCode, state.currentPositionMs, speed, nowElapsed)
+                .build()
+            session.setPlaybackState(playbackState)
+
+            lastPlaybackKey = playbackKey
+            lastSyncedPosMs = state.currentPositionMs
+            lastSyncedElapsedMs = nowElapsed
+            lastSyncedSpeed = speed
+        }
 
         if (surah != null) {
-            val albumArt = getAlbumArtBitmap()
-            val metadataBuilder = MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, "سورة ${surah.name}")
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, reciter?.name ?: "القارئ")
-                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, "القرآن الكريم")
-                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, "سورة ${surah.name}")
-                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, reciter?.name ?: "")
-                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_DESCRIPTION, "تلاوة القرآن الكريم بصوت ${reciter?.name ?: ""}")
-                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, state.totalDurationMs.coerceAtLeast(0L))
+            val metadataKey = "${surah.id}_${reciter?.id}_${state.totalDurationMs}"
+            if (forceUpdate || metadataKey != lastMetadataKey) {
+                lastMetadataKey = metadataKey
+                val albumArt = getAlbumArtBitmap()
+                val metadataBuilder = MediaMetadataCompat.Builder()
+                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, "سورة ${surah.name}")
+                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, reciter?.name ?: "القارئ")
+                    .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, "القرآن الكريم")
+                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, "سورة ${surah.name}")
+                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, reciter?.name ?: "")
+                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_DESCRIPTION, "تلاوة القرآن الكريم بصوت ${reciter?.name ?: ""}")
+                    .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, state.totalDurationMs.coerceAtLeast(0L))
 
-            if (albumArt != null) {
-                metadataBuilder
-                    .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, albumArt)
-                    .putBitmap(MediaMetadataCompat.METADATA_KEY_ART, albumArt)
-                    .putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, albumArt)
+                if (albumArt != null) {
+                    metadataBuilder
+                        .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, albumArt)
+                        .putBitmap(MediaMetadataCompat.METADATA_KEY_ART, albumArt)
+                        .putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, albumArt)
+                }
+
+                session.setMetadata(metadataBuilder.build())
             }
-
-            session.setMetadata(metadataBuilder.build())
         }
     }
 
-    /**
-     * Updates or triggers Foreground notification with MediaStyle controls.
-     */
-    private fun syncNotificationWithState(state: PlayerState) {
+    private fun formatSleepTimerLabel(state: PlayerState): String? {
+        return when {
+            state.sleepTimerOption == SleepTimerOption.END_OF_SURAH -> "مؤقت النوم: نهاية السورة"
+            state.sleepTimerSecondsRemaining > 0L -> {
+                val mins = state.sleepTimerSecondsRemaining / 60L
+                val secs = state.sleepTimerSecondsRemaining % 60L
+                "مؤقت النوم: ${String.format(Locale.US, "%02d:%02d", mins, secs)}"
+            }
+            else -> null
+        }
+    }
+
+    private fun syncNotificationWithState(state: PlayerState, forceUpdate: Boolean = false) {
         val surah = state.currentSurah
         if (surah == null) {
             stopPlaybackService()
@@ -303,7 +333,14 @@ class QuranAudioService : Service() {
             unregisterBecomingNoisyReceiver()
         }
 
-        val notification = buildNotification(state)
+        val sleepLabel = formatSleepTimerLabel(state)
+        val notificationKey = "${surah.id}_${state.currentReciter?.id}_${state.isPlaying}_${state.isBuffering}_${state.isPlayingOffline}_${sleepLabel}"
+        if (!forceUpdate && notificationKey == lastNotificationKey && (state.isPlaying == isForegroundActive)) {
+            return
+        }
+        lastNotificationKey = notificationKey
+
+        val notification = buildNotification(state, sleepLabel)
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         if (state.isPlaying) {
@@ -315,15 +352,11 @@ class QuranAudioService : Service() {
                         startForeground(NOTIFICATION_ID, notification)
                     }
                     isForegroundActive = true
-                } catch (_: Exception) {
-                    // Ignore foreground transition exceptions
-                }
+                } catch (_: Exception) {}
             } else {
                 notificationManager.notify(NOTIFICATION_ID, notification)
             }
         } else {
-            // Paused: detach from foreground to avoid Android background restrictions,
-            // while keeping the notification visible and fully interactive in the shade.
             if (isForegroundActive) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     stopForeground(STOP_FOREGROUND_DETACH)
@@ -340,6 +373,8 @@ class QuranAudioService : Service() {
     private fun stopPlaybackService() {
         unregisterBecomingNoisyReceiver()
         isForegroundActive = false
+        lastPlaybackKey = null
+        lastNotificationKey = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -351,16 +386,15 @@ class QuranAudioService : Service() {
         stopSelf()
     }
 
-    /**
-     * Builds the NotificationCompat with MediaNotificationCompat.MediaStyle.
-     */
-    private fun buildNotification(state: PlayerState): Notification {
+    private fun buildNotification(state: PlayerState, sleepLabel: String?): Notification {
         val surah = state.currentSurah
         val reciter = state.currentReciter
 
         val title = if (surah != null) "سورة ${surah.name}" else "القرآن الكريم"
         val subtitle = reciter?.name ?: "تلاوة القرآن الكريم"
         val modeText = if (state.isPlayingOffline) "تشغيل بدون إنترنت" else "بث صوتي مباشر"
+        val contentText = if (sleepLabel != null) "$subtitle • $sleepLabel" else "$subtitle • $modeText"
+        val subText = sleepLabel ?: "القرآن الكريم"
 
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -393,8 +427,8 @@ class QuranAudioService : Service() {
 
         val builder = NotificationCompat.Builder(this, QuranApp.CHANNEL_AUDIO_PLAYBACK)
             .setContentTitle(title)
-            .setContentText("$subtitle • $modeText")
-            .setSubText("القرآن الكريم")
+            .setContentText(contentText)
+            .setSubText(subText)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(contentPendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -410,12 +444,11 @@ class QuranAudioService : Service() {
             builder.setLargeIcon(albumArt)
         }
 
-        // Apply MediaNotificationCompat.MediaStyle from androidx.media
         mediaSession?.let { session ->
             builder.setStyle(
                 MediaNotificationCompat.MediaStyle()
                     .setMediaSession(session.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2) // Action 0 (Prev), Action 1 (Play/Pause), Action 2 (Next)
+                    .setShowActionsInCompactView(0, 1, 2)
                     .setShowCancelButton(true)
                     .setCancelButtonIntent(stopPending)
             )
@@ -424,9 +457,6 @@ class QuranAudioService : Service() {
         return builder.build()
     }
 
-    /**
-     * Generates an emerald-and-gold Islamic Quran artwork bitmap for lockscreen and notification media backdrop.
-     */
     private fun getAlbumArtBitmap(): Bitmap? {
         if (cachedAlbumArt != null && !cachedAlbumArt!!.isRecycled) {
             return cachedAlbumArt
@@ -436,13 +466,11 @@ class QuranAudioService : Service() {
             val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
 
-            // Islamic Emerald background
             val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = android.graphics.Color.parseColor("#0C2A1E")
             }
             canvas.drawRect(0f, 0f, size.toFloat(), size.toFloat(), bgPaint)
 
-            // Islamic Gold border
             val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = android.graphics.Color.parseColor("#D4AF37")
                 style = Paint.Style.STROKE
@@ -450,7 +478,6 @@ class QuranAudioService : Service() {
             }
             canvas.drawRoundRect(16f, 16f, (size - 16).toFloat(), (size - 16).toFloat(), 28f, 28f, borderPaint)
 
-            // Golden typography
             val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = android.graphics.Color.parseColor("#D4AF37")
                 textSize = 46f

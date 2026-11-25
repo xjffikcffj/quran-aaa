@@ -108,12 +108,18 @@ fun AddCustomReciterDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    if (name.isBlank() || serverUrl.isBlank()) {
+                    val cleanName = name.trim()
+                    val cleanUrl = serverUrl.trim()
+                    if (cleanName.isBlank() || cleanUrl.isBlank()) {
                         errorMsg = "يرجى تعبئة جميع الحقول المطلوبة"
                         return@Button
                     }
-                    val count = countText.toIntOrNull() ?: 114
-                    onAdd(name.trim(), serverUrl.trim(), count)
+                    if (!cleanUrl.startsWith("https://", ignoreCase = true) || cleanUrl.length <= 10) {
+                        errorMsg = "يرجى إدخال رابط خادم يبدأ بـ https:// لضمان الاتصال الآمن"
+                        return@Button
+                    }
+                    val count = (countText.toIntOrNull() ?: 114).coerceIn(1, 114)
+                    onAdd(cleanName, cleanUrl, count)
                     onDismiss()
                 },
                 modifier = Modifier.testTag("save_custom_reciter")

@@ -12,6 +12,9 @@ interface SurahStateDao {
     @Query("SELECT * FROM surah_states")
     fun getAllStates(): Flow<List<SurahStateEntity>>
 
+    @Query("SELECT * FROM surah_states ORDER BY surahNumber ASC")
+    suspend fun getAllStatesOnce(): List<SurahStateEntity>
+
     @Query("SELECT * FROM surah_states WHERE surahNumber = :surahNumber LIMIT 1")
     suspend fun getState(surahNumber: Int): SurahStateEntity?
 
