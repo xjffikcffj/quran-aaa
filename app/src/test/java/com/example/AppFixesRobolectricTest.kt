@@ -25,7 +25,9 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -357,7 +359,7 @@ class AppFixesRobolectricTest {
     }
 
     @Test
-    fun `SurahItemCard uses 16sp for Arabic surah name without clipping`() {
+    fun `SurahItemCard keeps minimal layout with 16sp Arabic name, 24dp badge, uniform 34dp play button, and no extra buttons`() {
         val surah = QuranData.getSurahById(3)!! // آل عمران
 
         composeRule.setContent {
@@ -368,14 +370,9 @@ class AppFixesRobolectricTest {
                             surah = surah,
                             isPlaying = false,
                             isCurrent = false,
-                            isFavorite = false,
-                            isDownloaded = false,
                             isAvailableForReciter = true,
                             onCardClick = {},
-                            onPlayClick = {},
-                            onFavoriteClick = {},
-                            onDownloadClick = {},
-                            onBookmarkClick = {}
+                            onPlayClick = {}
                         )
                     }
                 }
@@ -401,17 +398,28 @@ class AppFixesRobolectricTest {
         assertEquals(24f, badgeBounds.width.value, 0.5f)
         assertEquals(24f, badgeBounds.height.value, 0.5f)
 
-        val playBounds = composeRule.onNodeWithTag("play_button_3", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val playBounds = composeRule.onNodeWithTag("play_button_3", useUnmergedTree = true)
+            .assertIsDisplayed()
+            .getUnclippedBoundsInRoot()
+        assertEquals(34f, playBounds.width.value, 0.5f)
+        assertEquals(34f, playBounds.height.value, 0.5f)
         assertTrue("Surah badge icon must be smaller than play button", badgeBounds.width < playBounds.width)
 
-        val favBounds = composeRule.onNodeWithTag("fav_button_3", useUnmergedTree = true).getUnclippedBoundsInRoot()
         assertTrue(nameBounds.width > 0.dp && nameBounds.height > 0.dp)
-        // In RTL, name is on the right of quick actions, so favBounds.right <= nameBounds.left
-        assertTrue("Surah name overlapped action buttons", favBounds.right <= nameBounds.left + 0.5.dp)
+        // In RTL, name is to the right of the play button, and badge is to the right of the name
+        assertTrue("Surah name overlapped play button", playBounds.right <= nameBounds.left + 0.5.dp)
+        assertTrue("Surah badge overlapped surah name", nameBounds.right <= badgeBounds.left + 0.5.dp)
+
+        // Extra clutter elements must NOT exist on the Surah card
+        composeRule.onNodeWithTag("fav_button_3", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithTag("bookmark_button_3", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithTag("download_button_3", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithText("${surah.versesCount} آية", substring = true, useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithText(surah.englishName, substring = true, useUnmergedTree = true).assertDoesNotExist()
     }
 
     @Test
-    fun `All 114 Surah badges have identical 24dp dimensions and balanced text under large fontScale and narrow screens`() {
+    fun `All 114 Surah badges and play buttons have identical uniform dimensions under large fontScale and narrow screens`() {
         var currentSurahIndex by mutableStateOf(0)
         val allSurahs = QuranData.allSurahs
         assertEquals(114, allSurahs.size)
@@ -433,14 +441,9 @@ class AppFixesRobolectricTest {
                             surah = surah,
                             isPlaying = surah.id % 2 == 0,
                             isCurrent = surah.id % 3 == 0,
-                            isFavorite = surah.id % 5 == 0,
-                            isDownloaded = surah.id % 4 == 0,
                             isAvailableForReciter = surah.id != 50,
                             onCardClick = {},
-                            onPlayClick = {},
-                            onFavoriteClick = {},
-                            onDownloadClick = {},
-                            onBookmarkClick = {}
+                            onPlayClick = {}
                         )
                     }
                 }
@@ -458,6 +461,12 @@ class AppFixesRobolectricTest {
                 .getUnclippedBoundsInRoot()
             assertEquals("Width mismatch for surah ${surah.id}", 24f, badgeBounds.width.value, 0.2f)
             assertEquals("Height mismatch for surah ${surah.id}", 24f, badgeBounds.height.value, 0.2f)
+
+            val playBounds = composeRule.onNodeWithTag("play_button_${surah.id}", useUnmergedTree = true)
+                .assertIsDisplayed()
+                .getUnclippedBoundsInRoot()
+            assertEquals("Play button width mismatch for surah ${surah.id}", 34f, playBounds.width.value, 0.2f)
+            assertEquals("Play button height mismatch for surah ${surah.id}", 34f, playBounds.height.value, 0.2f)
 
             val textNode = composeRule.onNodeWithTag("surah_badge_text_${surah.id}", useUnmergedTree = true)
             val layouts = mutableListOf<TextLayoutResult>()
@@ -479,6 +488,56 @@ class AppFixesRobolectricTest {
                 assertEquals("Visual glyph size differed for surah ${surah.id}", baselineTextFontSizePx, renderedFontPx, 0.5f)
             }
         }
+    }
+
+    @Test
+    fun `Main screen matches reference visual structure with topbar search beside sleep timer, filter pills, and preserved banner space`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = QuranViewModel(app)
+
+        composeRule.setContent {
+            QuranAppTheme(darkTheme = true) {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                    QuranMainScreen(
+                        viewModel = viewModel,
+                        isDeveloperPanelEnabled = false
+                    )
+                }
+            }
+        }
+
+        composeRule.waitForIdle()
+
+        // 1. Search icon next to night/sleep timer icon in TopAppBar (RTL: sleep timer at far left, search next to its right)
+        val searchBounds = composeRule.onNodeWithTag("topbar_search_button").assertIsDisplayed().getUnclippedBoundsInRoot()
+        val sleepBounds = composeRule.onNodeWithTag("topbar_sleep_timer").assertIsDisplayed().getUnclippedBoundsInRoot()
+        assertTrue("Search icon must sit immediately next to sleep timer in RTL", sleepBounds.right <= searchBounds.left + 0.5.dp)
+
+        // 2. Search bar hidden initially, expands when TopAppBar search icon is clicked
+        composeRule.onNodeWithTag("surah_search_input").assertDoesNotExist()
+        composeRule.onNodeWithTag("topbar_search_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("surah_search_input").assertIsDisplayed()
+        composeRule.onNodeWithTag("surah_search_input").performTextInput("الكهف")
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("surah_card_18").assertIsDisplayed()
+        composeRule.onNodeWithTag("topbar_search_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("surah_search_input").assertDoesNotExist()
+
+        // 3. Filter pills "الجميع (114)" and "المفضلة (0)" at top of list
+        composeRule.onNodeWithTag("filter_all_surahs").assertIsDisplayed()
+        composeRule.onNodeWithText("الجميع (114)").assertIsDisplayed()
+        composeRule.onNodeWithTag("filter_favorite_surahs").assertIsDisplayed()
+
+        // 4. First Surah numbered 1 appears cleanly and banner space stays between MiniPlayerBar and NavigationBar
+        composeRule.onNodeWithTag("surah_badge_1", useUnmergedTree = true).assertIsDisplayed()
+        val miniBounds = composeRule.onNodeWithTag("mini_player_bar").assertIsDisplayed().getUnclippedBoundsInRoot()
+        val bannerBounds = composeRule.onNodeWithTag("admob_banner_container").assertIsDisplayed().getUnclippedBoundsInRoot()
+        val navBounds = composeRule.onNodeWithTag("nav_surahs").assertIsDisplayed().getUnclippedBoundsInRoot()
+        assertTrue("Banner space was shrunk or removed", bannerBounds.height >= 50.dp)
+        assertTrue("Banner must sit below MiniPlayerBar", miniBounds.bottom <= bannerBounds.top + 0.5.dp)
+        assertTrue("Banner must sit above NavigationBar", bannerBounds.bottom <= navBounds.top + 0.5.dp)
     }
 
     @Test

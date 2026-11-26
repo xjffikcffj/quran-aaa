@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -160,6 +161,7 @@ fun QuranMainScreen(
     var showDeveloperScreen by remember { mutableStateOf(false) }
     var showFullPlayer by remember { mutableStateOf(false) }
     var showSleepTimerDialog by remember { mutableStateOf(false) }
+    var showSurahSearch by remember { mutableStateOf(false) }
     var bookmarkSurahTarget by remember { mutableStateOf<Surah?>(null) }
 
     val playerState by viewModel.playerState.collectAsState()
@@ -262,6 +264,30 @@ fun QuranMainScreen(
                     }
                 },
                 actions = {
+                    if (!isDeveloperViewActive && selectedTab == 0) {
+                        IconButton(
+                            onClick = {
+                                if (showSurahSearch) {
+                                    showSurahSearch = false
+                                    viewModel.onSearchQueryChanged("")
+                                } else {
+                                    showSurahSearch = true
+                                }
+                            },
+                            modifier = Modifier.testTag("topbar_search_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = "بحث في السور",
+                                tint = if (showSurahSearch) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                    }
+
                     Box {
                         IconButton(
                             onClick = { showSleepTimerDialog = true },
@@ -310,7 +336,7 @@ fun QuranMainScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = MaterialTheme.colorScheme.background
                 ),
                 windowInsets = WindowInsets.statusBars
             )
@@ -409,8 +435,10 @@ fun QuranMainScreen(
                                 showFullPlayer = true
                             }
                         },
-                        onOpenAddBookmark = { surah ->
-                            bookmarkSurahTarget = surah
+                        isSearchVisible = showSurahSearch,
+                        onCloseSearch = {
+                            showSurahSearch = false
+                            viewModel.onSearchQueryChanged("")
                         }
                     )
                     1 -> RecitersScreen(viewModel = viewModel)
