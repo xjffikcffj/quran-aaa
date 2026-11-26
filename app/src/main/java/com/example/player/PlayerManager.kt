@@ -600,6 +600,10 @@ class PlayerManager private constructor(private val context: Context) {
             return
         }
 
+        if (autoPlay) {
+            syncServiceNotification()
+        }
+
         if (validLocalFile != null) {
             prepareMediaPlayer(
                 requestId = requestId,
@@ -1243,11 +1247,15 @@ class PlayerManager private constructor(private val context: Context) {
 
     private fun syncServiceNotification() {
         val state = _playerState.value
+        val shouldRunForeground = state.isPlaying || state.isBuffering
         val intent = Intent(context, QuranAudioService::class.java).apply {
-            action = if (state.isPlaying) QuranAudioService.ACTION_UPDATE_STATUS else QuranAudioService.ACTION_PAUSE_STATUS
+            action = if (shouldRunForeground) QuranAudioService.ACTION_UPDATE_STATUS else QuranAudioService.ACTION_PAUSE_STATUS
+            if (shouldRunForeground) {
+                putExtra(QuranAudioService.EXTRA_STARTED_FOREGROUND, true)
+            }
         }
         try {
-            if (state.isPlaying) {
+            if (shouldRunForeground) {
                 ContextCompat.startForegroundService(context, intent)
             } else {
                 context.startService(intent)

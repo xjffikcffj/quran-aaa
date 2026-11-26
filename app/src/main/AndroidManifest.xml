@@ -64,6 +64,10 @@
         </receiver>
 
         <receiver
+            android:name=".receiver.QuranNotificationReceiver"
+            android:exported="false" />
+
+        <receiver
             android:name=".receiver.FridayReminderReceiver"
             android:exported="false">
             <intent-filter>

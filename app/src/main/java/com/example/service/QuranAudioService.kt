@@ -20,8 +20,10 @@ import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
 import androidx.media.session.MediaButtonReceiver
 import com.example.MainActivity
@@ -30,6 +32,7 @@ import com.example.R
 import com.example.model.PlayerState
 import com.example.model.SleepTimerOption
 import com.example.player.PlayerManager
+import com.example.receiver.QuranNotificationReceiver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -54,6 +57,7 @@ class QuranAudioService : Service() {
         const val ACTION_FAST_FORWARD = "com.example.service.ACTION_FAST_FORWARD"
         const val ACTION_UPDATE_STATUS = "com.example.service.ACTION_UPDATE_STATUS"
         const val ACTION_PAUSE_STATUS = "com.example.service.ACTION_PAUSE_STATUS"
+        const val EXTRA_STARTED_FOREGROUND = "com.example.service.EXTRA_STARTED_FOREGROUND"
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -96,6 +100,7 @@ class QuranAudioService : Service() {
             setMediaButtonReceiver(mediaButtonPendingIntent)
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() {
+                    ensureForegroundNotification(playerManager.playerState.value)
                     playerManager.resume()
                 }
 
@@ -104,10 +109,12 @@ class QuranAudioService : Service() {
                 }
 
                 override fun onSkipToNext() {
+                    ensureForegroundNotification(playerManager.playerState.value)
                     playerManager.playNextSurah()
                 }
 
                 override fun onSkipToPrevious() {
+                    ensureForegroundNotification(playerManager.playerState.value)
                     playerManager.playPreviousSurah()
                 }
 
@@ -141,6 +148,10 @@ class QuranAudioService : Service() {
             isActive = true
         }
 
+        // Populate metadata & playback state synchronously so MediaButtonReceiver.handleIntent
+        // immediately sees the persisted PAUSED state on cold service recreation.
+        syncMediaSessionState(playerManager.playerState.value, forceUpdate = true)
+
         serviceScope.launch {
             playerManager.playerState.collectLatest { state ->
                 syncMediaSessionState(state)
@@ -168,11 +179,41 @@ class QuranAudioService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        MediaButtonReceiver.handleIntent(mediaSession, intent)
         val playerManager = PlayerManager.getInstance(this)
+        val startedAsForeground = intent?.getBooleanExtra(EXTRA_STARTED_FOREGROUND, false) == true ||
+            intent?.action == Intent.ACTION_MEDIA_BUTTON
+
+        if (startedAsForeground) {
+            ensureForegroundNotification(playerManager.playerState.value)
+        }
+
+        if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
+            val keyEvent = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+            if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
+                when (keyEvent.keyCode) {
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> playerManager.resume()
+                    KeyEvent.KEYCODE_MEDIA_PAUSE -> playerManager.pause()
+                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                    KeyEvent.KEYCODE_HEADSETHOOK -> playerManager.togglePlayPause()
+                    KeyEvent.KEYCODE_MEDIA_NEXT -> playerManager.playNextSurah()
+                    KeyEvent.KEYCODE_MEDIA_PREVIOUS -> playerManager.playPreviousSurah()
+                    KeyEvent.KEYCODE_MEDIA_STOP -> {
+                        playerManager.stop(notifyService = false)
+                        stopPlaybackService()
+                        return START_NOT_STICKY
+                    }
+                    else -> MediaButtonReceiver.handleIntent(mediaSession, intent)
+                }
+            } else if (keyEvent == null) {
+                MediaButtonReceiver.handleIntent(mediaSession, intent)
+            }
+        } else {
+            MediaButtonReceiver.handleIntent(mediaSession, intent)
+        }
 
         if (intent == null) {
-            if (!playerManager.playerState.value.isPlaying) {
+            val state = playerManager.playerState.value
+            if (!state.isPlaying && !state.isBuffering) {
                 stopPlaybackService()
                 return START_NOT_STICKY
             }
@@ -204,6 +245,10 @@ class QuranAudioService : Service() {
                 syncMediaSessionState(playerManager.playerState.value, forceUpdate = true)
                 syncNotificationWithState(playerManager.playerState.value, forceUpdate = true)
             }
+        }
+
+        if (startedAsForeground) {
+            syncNotificationWithState(playerManager.playerState.value, forceUpdate = true)
         }
 
         return START_NOT_STICKY
@@ -320,6 +365,20 @@ class QuranAudioService : Service() {
         }
     }
 
+    private fun ensureForegroundNotification(state: PlayerState) {
+        if (isForegroundActive) return
+        val sleepLabel = formatSleepTimerLabel(state)
+        val notification = buildNotification(state, sleepLabel)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            isForegroundActive = true
+        } catch (_: Exception) {}
+    }
+
     private fun syncNotificationWithState(state: PlayerState, forceUpdate: Boolean = false) {
         val surah = state.currentSurah
         if (surah == null) {
@@ -327,7 +386,9 @@ class QuranAudioService : Service() {
             return
         }
 
-        if (state.isPlaying) {
+        val shouldBeForeground = state.isPlaying || state.isBuffering
+
+        if (shouldBeForeground) {
             registerBecomingNoisyReceiver()
         } else {
             unregisterBecomingNoisyReceiver()
@@ -335,7 +396,7 @@ class QuranAudioService : Service() {
 
         val sleepLabel = formatSleepTimerLabel(state)
         val notificationKey = "${surah.id}_${state.currentReciter?.id}_${state.isPlaying}_${state.isBuffering}_${state.isPlayingOffline}_${sleepLabel}"
-        if (!forceUpdate && notificationKey == lastNotificationKey && (state.isPlaying == isForegroundActive)) {
+        if (!forceUpdate && notificationKey == lastNotificationKey && (shouldBeForeground == isForegroundActive)) {
             return
         }
         lastNotificationKey = notificationKey
@@ -343,7 +404,7 @@ class QuranAudioService : Service() {
         val notification = buildNotification(state, sleepLabel)
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-        if (state.isPlaying) {
+        if (shouldBeForeground) {
             if (!isForegroundActive) {
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -406,24 +467,27 @@ class QuranAudioService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val prevIntent = Intent(this, QuranAudioService::class.java).apply { action = ACTION_PREV }
-        val prevPending = PendingIntent.getService(this, 1, prevIntent, PendingIntent.FLAG_IMMUTABLE)
+        val broadcastFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
 
-        val toggleIntent = Intent(this, QuranAudioService::class.java).apply { action = ACTION_TOGGLE }
-        val togglePending = PendingIntent.getService(this, 2, toggleIntent, PendingIntent.FLAG_IMMUTABLE)
+        val prevIntent = Intent(this, QuranNotificationReceiver::class.java).apply { action = ACTION_PREV }
+        val prevPending = PendingIntent.getBroadcast(this, 1, prevIntent, broadcastFlags)
 
-        val nextIntent = Intent(this, QuranAudioService::class.java).apply { action = ACTION_NEXT }
-        val nextPending = PendingIntent.getService(this, 3, nextIntent, PendingIntent.FLAG_IMMUTABLE)
+        val toggleIntent = Intent(this, QuranNotificationReceiver::class.java).apply { action = ACTION_TOGGLE }
+        val togglePending = PendingIntent.getBroadcast(this, 2, toggleIntent, broadcastFlags)
 
-        val stopIntent = Intent(this, QuranAudioService::class.java).apply { action = ACTION_STOP }
-        val stopPending = PendingIntent.getService(this, 4, stopIntent, PendingIntent.FLAG_IMMUTABLE)
+        val nextIntent = Intent(this, QuranNotificationReceiver::class.java).apply { action = ACTION_NEXT }
+        val nextPending = PendingIntent.getBroadcast(this, 3, nextIntent, broadcastFlags)
 
-        val playPauseIcon = if (state.isPlaying) {
+        val stopIntent = Intent(this, QuranNotificationReceiver::class.java).apply { action = ACTION_STOP }
+        val stopPending = PendingIntent.getBroadcast(this, 4, stopIntent, broadcastFlags)
+
+        val showPauseAction = state.isPlaying || state.isBuffering
+        val playPauseIcon = if (showPauseAction) {
             android.R.drawable.ic_media_pause
         } else {
             android.R.drawable.ic_media_play
         }
-        val playPauseLabel = if (state.isPlaying) "إيقاف مؤقت" else "تشغيل"
+        val playPauseLabel = if (showPauseAction) "إيقاف مؤقت" else "تشغيل"
 
         val builder = NotificationCompat.Builder(this, QuranApp.CHANNEL_AUDIO_PLAYBACK)
             .setContentTitle(title)
@@ -432,7 +496,7 @@ class QuranAudioService : Service() {
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(contentPendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(state.isPlaying)
+            .setOngoing(state.isPlaying || state.isBuffering)
             .setOnlyAlertOnce(true)
             .addAction(android.R.drawable.ic_media_previous, "السابقة", prevPending)
             .addAction(playPauseIcon, playPauseLabel, togglePending)

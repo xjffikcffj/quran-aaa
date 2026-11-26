@@ -606,4 +606,255 @@ class AppFixesRobolectricTest {
         }
         assertEquals(listOf("quran_prefs.xml", "quran_prefs.xml"), cloudPaths)
     }
+
+    private fun resetPlayerManagerSingletonForTest() {
+        val instanceField = com.example.player.PlayerManager::class.java.getDeclaredField("instance")
+        instanceField.isAccessible = true
+        val existing = instanceField.get(null) as? com.example.player.PlayerManager
+        existing?.stop(notifyService = false)
+        instanceField.set(null, null)
+    }
+
+    private fun registerFakeMediaInfo(context: Context, reciter: com.example.model.Reciter, surahId: Int, durationMs: Int = 600_000) {
+        val url = reciter.getAudioUrl(surahId)
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 QuranAudio/1.0",
+            "Accept" to "*/*"
+        )
+        val dsWithHeaders = org.robolectric.shadows.util.DataSource.toDataSource(context, android.net.Uri.parse(url), headers)
+        val dsPlain = org.robolectric.shadows.util.DataSource.toDataSource(url)
+        val info = org.robolectric.shadows.ShadowMediaPlayer.MediaInfo(durationMs, 0)
+        org.robolectric.shadows.ShadowMediaPlayer.addMediaInfo(dsWithHeaders, info)
+        org.robolectric.shadows.ShadowMediaPlayer.addMediaInfo(dsPlain, info)
+    }
+
+    @Test
+    fun `notification actions use BroadcastReceiver PendingIntents and manifest registers QuranNotificationReceiver safely`() {
+        resetPlayerManagerSingletonForTest()
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val pm = com.example.player.PlayerManager.getInstance(app)
+        pm.forceNetworkConnectedForTest = true
+        registerFakeMediaInfo(app, DefaultReciters.defaultReciter, 18)
+        pm.playSurah(QuranData.getSurahById(18)!!, seekToMs = 45_000L, autoPlay = false)
+
+        val controller = org.robolectric.Robolectric.buildService(com.example.service.QuranAudioService::class.java)
+        val service = controller.create().get()
+        try {
+            service.onStartCommand(
+                android.content.Intent(app, com.example.service.QuranAudioService::class.java).apply {
+                    action = com.example.service.QuranAudioService.ACTION_PAUSE_STATUS
+                },
+                0,
+                1
+            )
+
+            val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val posted = Shadows.shadowOf(nm).getNotification(com.example.service.QuranAudioService.NOTIFICATION_ID)
+            org.junit.Assert.assertNotNull("Paused notification must stay visible", posted)
+            assertEquals(4, posted!!.actions.size)
+
+            posted.actions.forEach { action ->
+                val shadowPi = Shadows.shadowOf(action.actionIntent)
+                assertTrue("Notification action '${action.title}' must use getBroadcast instead of getService", shadowPi.isBroadcast)
+                assertFalse("Notification action '${action.title}' must not use getService", shadowPi.isService)
+                assertEquals(
+                    com.example.receiver.QuranNotificationReceiver::class.java.name,
+                    shadowPi.savedIntent.component?.className
+                )
+            }
+
+            val receiverInfo = app.packageManager.getReceiverInfo(
+                android.content.ComponentName(app, com.example.receiver.QuranNotificationReceiver::class.java),
+                0
+            )
+            assertFalse("QuranNotificationReceiver must remain non-exported", receiverInfo.exported)
+        } finally {
+            controller.destroy()
+            pm.forceNetworkConnectedForTest = null
+            resetPlayerManagerSingletonForTest()
+        }
+    }
+
+    @Test
+    fun `notification controls resume playback at saved position, skip next-prev, and stop cleanly after long pause and process kill`() {
+        resetPlayerManagerSingletonForTest()
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val pm = com.example.player.PlayerManager.getInstance(app)
+        pm.forceNetworkConnectedForTest = true
+
+        val reciter = DefaultReciters.defaultReciter
+        registerFakeMediaInfo(app, reciter, 18, 600_000)
+        registerFakeMediaInfo(app, reciter, 19, 600_000)
+        val surah18 = QuranData.getSurahById(18)!!
+
+        // 1. Start playing, pause, simulate 5 minutes paused in background (detached notification)
+        pm.playSurah(surah18, seekToMs = 125_000L, autoPlay = true)
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        pm.savePosition(reciter.id, surah18.id, 125_000L, 600_000L, force = true)
+        pm.pause()
+
+        val pausedTimeField = com.example.player.PlayerManager::class.java.getDeclaredField("lastPausedTimeMs")
+        pausedTimeField.isAccessible = true
+        pausedTimeField.setLong(pm, System.currentTimeMillis() - 5 * 60_000L) // 5 minutes ago
+
+        val receiver = com.example.receiver.QuranNotificationReceiver()
+        val shadowApp = Shadows.shadowOf(app)
+        shadowApp.clearStartedServices()
+
+        // Tap Play from notification after 5-minute pause (even with live detached/stopped service)
+        receiver.onReceive(
+            app,
+            android.content.Intent(app, com.example.receiver.QuranNotificationReceiver::class.java).apply {
+                action = com.example.service.QuranAudioService.ACTION_TOGGLE
+            }
+        )
+        val resumeAfterLongPauseIntent = shadowApp.nextStartedService
+        org.junit.Assert.assertNotNull("Tapping Play after 5-minute pause must trigger startForegroundService", resumeAfterLongPauseIntent)
+        assertEquals(com.example.service.QuranAudioService.ACTION_PLAY, resumeAfterLongPauseIntent!!.action)
+
+        val liveServiceController = org.robolectric.Robolectric.buildService(com.example.service.QuranAudioService::class.java)
+        val liveService = liveServiceController.create().get()
+        liveService.onStartCommand(resumeAfterLongPauseIntent, 0, 1)
+        Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertTrue("Playback must resume after 5-minute pause", pm.playerState.value.isPlaying)
+        assertEquals(18, pm.playerState.value.currentSurah?.id)
+        assertEquals(125_000L, pm.playerState.value.currentPositionMs)
+
+        // Pause again, save position, then simulate Android destroying service AND killing app process
+        pm.pause()
+        pm.savePosition(reciter.id, surah18.id, 125_000L, 600_000L, force = true)
+        liveServiceController.destroy()
+        shadowApp.clearStartedServices()
+        resetPlayerManagerSingletonForTest()
+
+        val restoredPm = com.example.player.PlayerManager.getInstance(app)
+        restoredPm.forceNetworkConnectedForTest = true
+        assertEquals(18, restoredPm.playerState.value.currentSurah?.id)
+        assertEquals(125_000L, restoredPm.playerState.value.currentPositionMs)
+        assertFalse(restoredPm.playerState.value.isPlaying)
+
+        // 2. Tap Play/Toggle from detached notification after process kill
+        receiver.onReceive(
+            app,
+            android.content.Intent(app, com.example.receiver.QuranNotificationReceiver::class.java).apply {
+                action = com.example.service.QuranAudioService.ACTION_TOGGLE
+            }
+        )
+
+        val startedIntent = shadowApp.nextStartedService
+        org.junit.Assert.assertNotNull("Tapping Play on notification after process kill must start QuranAudioService", startedIntent)
+        assertEquals(com.example.service.QuranAudioService.ACTION_PLAY, startedIntent!!.action)
+        assertTrue(startedIntent.getBooleanExtra(com.example.service.QuranAudioService.EXTRA_STARTED_FOREGROUND, false))
+
+        // 3. Deliver that startForegroundService intent to a fresh QuranAudioService instance
+        val serviceController = org.robolectric.Robolectric.buildService(com.example.service.QuranAudioService::class.java)
+        val service = serviceController.create().get()
+        try {
+            service.onStartCommand(startedIntent, 0, 1)
+
+            val shadowService = Shadows.shadowOf(service)
+            org.junit.Assert.assertNotNull(
+                "Service must call startForeground synchronously even while buffering",
+                shadowService.lastForegroundNotification
+            )
+            assertFalse("Service foreground must remain active immediately after startForegroundService", shadowService.isForegroundStopped)
+            assertTrue("PlayerManager must be buffering or playing immediately", restoredPm.playerState.value.isBuffering || restoredPm.playerState.value.isPlaying)
+
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(18, restoredPm.playerState.value.currentSurah?.id)
+            assertEquals(125_000L, restoredPm.playerState.value.currentPositionMs)
+            assertTrue("Playback must become active after prepare completes", restoredPm.playerState.value.isPlaying)
+
+            // 4. Pause again and test Next & Prev actions via QuranNotificationReceiver -> Service
+            restoredPm.pause()
+            shadowApp.clearStartedServices()
+
+            receiver.onReceive(
+                app,
+                android.content.Intent(app, com.example.receiver.QuranNotificationReceiver::class.java).apply {
+                    action = com.example.service.QuranAudioService.ACTION_NEXT
+                }
+            )
+            val nextServiceIntent = shadowApp.nextStartedService
+            org.junit.Assert.assertNotNull(nextServiceIntent)
+            service.onStartCommand(nextServiceIntent, 0, 2)
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(19, restoredPm.playerState.value.currentSurah?.id)
+            assertTrue(restoredPm.playerState.value.isPlaying)
+
+            shadowApp.clearStartedServices()
+            receiver.onReceive(
+                app,
+                android.content.Intent(app, com.example.receiver.QuranNotificationReceiver::class.java).apply {
+                    action = com.example.service.QuranAudioService.ACTION_PREV
+                }
+            )
+            val prevServiceIntent = shadowApp.nextStartedService
+            org.junit.Assert.assertNotNull(prevServiceIntent)
+            service.onStartCommand(prevServiceIntent, 0, 3)
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(18, restoredPm.playerState.value.currentSurah?.id)
+            assertTrue(restoredPm.playerState.value.isPlaying)
+
+            // 5. Stop action cancels notification cleanly without calling startForegroundService
+            shadowApp.clearStartedServices()
+            receiver.onReceive(
+                app,
+                android.content.Intent(app, com.example.receiver.QuranNotificationReceiver::class.java).apply {
+                    action = com.example.service.QuranAudioService.ACTION_STOP
+                }
+            )
+            assertNull("ACTION_STOP must not call startForegroundService", shadowApp.nextStartedService)
+            val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            assertNull(Shadows.shadowOf(nm).getNotification(com.example.service.QuranAudioService.NOTIFICATION_ID))
+        } finally {
+            serviceController.destroy()
+            restoredPm.forceNetworkConnectedForTest = null
+            resetPlayerManagerSingletonForTest()
+        }
+    }
+
+    @Test
+    fun `cold-started QuranAudioService handles ACTION_MEDIA_BUTTON play-pause with immediate startForeground`() {
+        resetPlayerManagerSingletonForTest()
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val pm = com.example.player.PlayerManager.getInstance(app)
+        pm.forceNetworkConnectedForTest = true
+        registerFakeMediaInfo(app, DefaultReciters.defaultReciter, 5, 400_000)
+
+        val surah5 = QuranData.getSurahById(5)!!
+        pm.playSurah(surah5, seekToMs = 33_000L, autoPlay = false)
+        pm.savePosition(DefaultReciters.defaultReciter.id, surah5.id, 33_000L, 400_000L, force = true)
+        pm.pause()
+
+        val mediaButtonIntent = android.content.Intent(android.content.Intent.ACTION_MEDIA_BUTTON).apply {
+            putExtra(
+                android.content.Intent.EXTRA_KEY_EVENT,
+                android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+            )
+        }
+
+        val serviceController = org.robolectric.Robolectric.buildService(com.example.service.QuranAudioService::class.java)
+        val service = serviceController.create().get()
+        try {
+            service.onStartCommand(mediaButtonIntent, 0, 1)
+            val shadowService = Shadows.shadowOf(service)
+            org.junit.Assert.assertNotNull(
+                "ACTION_MEDIA_BUTTON cold start must enter startForeground immediately",
+                shadowService.lastForegroundNotification
+            )
+            assertFalse("Service must stay foreground during buffering", shadowService.isForegroundStopped)
+            assertTrue(
+                "KEYCODE_MEDIA_PLAY_PAUSE must resume playback using synchronously synced PAUSED MediaSession state",
+                pm.playerState.value.isBuffering || pm.playerState.value.isPlaying
+            )
+            Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(5, pm.playerState.value.currentSurah?.id)
+            assertTrue(pm.playerState.value.isPlaying)
+        } finally {
+            serviceController.destroy()
+            pm.forceNetworkConnectedForTest = null
+            resetPlayerManagerSingletonForTest()
+        }
+    }
 }
