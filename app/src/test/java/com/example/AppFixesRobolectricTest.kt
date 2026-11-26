@@ -398,8 +398,8 @@ class AppFixesRobolectricTest {
         val badgeNode = composeRule.onNodeWithTag("surah_badge_3", useUnmergedTree = true)
         badgeNode.assertIsDisplayed()
         val badgeBounds = badgeNode.getUnclippedBoundsInRoot()
-        assertEquals(32f, badgeBounds.width.value, 0.5f)
-        assertEquals(32f, badgeBounds.height.value, 0.5f)
+        assertEquals(24f, badgeBounds.width.value, 0.5f)
+        assertEquals(24f, badgeBounds.height.value, 0.5f)
 
         val playBounds = composeRule.onNodeWithTag("play_button_3", useUnmergedTree = true).getUnclippedBoundsInRoot()
         assertTrue("Surah badge icon must be smaller than play button", badgeBounds.width < playBounds.width)
@@ -411,20 +411,31 @@ class AppFixesRobolectricTest {
     }
 
     @Test
-    fun `SurahItemCard compact 32dp badge displays 3-digit surah number cleanly`() {
-        val surah114 = QuranData.getSurahById(114)!! // الناس
+    fun `All 114 Surah badges have identical 24dp dimensions and balanced text under large fontScale and narrow screens`() {
+        var currentSurahIndex by mutableStateOf(0)
+        val allSurahs = QuranData.allSurahs
+        assertEquals(114, allSurahs.size)
 
         composeRule.setContent {
+            val currentDensity = LocalDensity.current
+            val largeFontDensity = androidx.compose.ui.unit.Density(
+                density = currentDensity.density,
+                fontScale = 1.5f
+            )
             QuranAppTheme {
-                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-                    Box(modifier = Modifier.width(360.dp)) {
+                CompositionLocalProvider(
+                    LocalLayoutDirection provides LayoutDirection.Rtl,
+                    LocalDensity provides largeFontDensity
+                ) {
+                    val surah = allSurahs[currentSurahIndex]
+                    Box(modifier = Modifier.width(320.dp)) {
                         SurahItemCard(
-                            surah = surah114,
-                            isPlaying = true,
-                            isCurrent = true,
-                            isFavorite = false,
-                            isDownloaded = false,
-                            isAvailableForReciter = true,
+                            surah = surah,
+                            isPlaying = surah.id % 2 == 0,
+                            isCurrent = surah.id % 3 == 0,
+                            isFavorite = surah.id % 5 == 0,
+                            isDownloaded = surah.id % 4 == 0,
+                            isAvailableForReciter = surah.id != 50,
                             onCardClick = {},
                             onPlayClick = {},
                             onFavoriteClick = {},
@@ -436,12 +447,71 @@ class AppFixesRobolectricTest {
             }
         }
 
+        var baselineTextFontSizePx = -1f
+        for (idx in allSurahs.indices) {
+            currentSurahIndex = idx
+            composeRule.waitForIdle()
+            val surah = allSurahs[idx]
+
+            val badgeBounds = composeRule.onNodeWithTag("surah_badge_${surah.id}", useUnmergedTree = true)
+                .assertIsDisplayed()
+                .getUnclippedBoundsInRoot()
+            assertEquals("Width mismatch for surah ${surah.id}", 24f, badgeBounds.width.value, 0.2f)
+            assertEquals("Height mismatch for surah ${surah.id}", 24f, badgeBounds.height.value, 0.2f)
+
+            val textNode = composeRule.onNodeWithTag("surah_badge_text_${surah.id}", useUnmergedTree = true)
+            val layouts = mutableListOf<TextLayoutResult>()
+            textNode.fetchSemanticsNode().config[SemanticsActions.GetTextLayoutResult].action?.invoke(layouts)
+            assertTrue("Missing text layout for surah ${surah.id}", layouts.isNotEmpty())
+            val layout = layouts.first()
+            assertEquals("Badge text wrapped for surah ${surah.id}: ${layout.size}", 1, layout.lineCount)
+            assertFalse(
+                "Badge text overflowed width for surah ${surah.id}: size=${layout.size}, lineW=${layout.getLineRight(0) - layout.getLineLeft(0)}, maxW=${layout.layoutInput.constraints.maxWidth}",
+                layout.didOverflowWidth
+            )
+
+            val renderedFontPx = layout.layoutInput.density.run { layout.layoutInput.style.fontSize.toPx() }
+            val expectedFontPx = layout.layoutInput.density.run { 9.5.dp.toPx() }
+            assertEquals("Badge font failed to lock to 9.5dp under fontScale=1.5 for surah ${surah.id}", expectedFontPx, renderedFontPx, 0.5f)
+            if (baselineTextFontSizePx < 0f) {
+                baselineTextFontSizePx = renderedFontPx
+            } else {
+                assertEquals("Visual glyph size differed for surah ${surah.id}", baselineTextFontSizePx, renderedFontPx, 0.5f)
+            }
+        }
+    }
+
+    @Test
+    fun `MiniPlayerBar surah badge matches unified 24dp size`() {
+        val sampleSurah = QuranData.getSurahById(114)!!
+        val playerState = PlayerState(
+            currentSurah = sampleSurah,
+            currentReciter = DefaultReciters.defaultReciter,
+            isPlaying = false
+        )
+
+        composeRule.setContent {
+            QuranAppTheme {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                    Box(modifier = Modifier.width(360.dp)) {
+                        MiniPlayerBar(
+                            playerState = playerState,
+                            onBarClick = {},
+                            onPlayPauseClick = {},
+                            onNextClick = {},
+                            onPrevClick = {}
+                        )
+                    }
+                }
+            }
+        }
+
         composeRule.waitForIdle()
-        val badgeBounds = composeRule.onNodeWithTag("surah_badge_114", useUnmergedTree = true)
+        val miniBadgeBounds = composeRule.onNodeWithTag("mini_player_surah_badge", useUnmergedTree = true)
             .assertIsDisplayed()
             .getUnclippedBoundsInRoot()
-        assertEquals(32f, badgeBounds.width.value, 0.5f)
-        assertEquals(32f, badgeBounds.height.value, 0.5f)
+        assertEquals(24f, miniBadgeBounds.width.value, 0.2f)
+        assertEquals(24f, miniBadgeBounds.height.value, 0.2f)
     }
 
     @Test

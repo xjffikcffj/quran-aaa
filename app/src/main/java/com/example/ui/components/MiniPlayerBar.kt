@@ -108,22 +108,14 @@ fun MiniPlayerBar(
                         .padding(horizontal = 8.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Compact Surah Number Badge
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .background(MaterialTheme.colorScheme.primary, CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "${currentSurah.id}",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp
-                            )
-                        )
-                    }
+                    // Unified 24dp Surah Number Badge
+                    SurahNumberBadge(
+                        surahId = currentSurah.id,
+                        isActive = true,
+                        shape = CircleShape,
+                        showBorder = false,
+                        modifier = Modifier.testTag("mini_player_surah_badge")
+                    )
 
                     Spacer(modifier = Modifier.width(8.dp))
 

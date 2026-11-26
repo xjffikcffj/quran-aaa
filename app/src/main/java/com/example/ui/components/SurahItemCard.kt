@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -37,13 +38,80 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Surah
 import com.example.ui.theme.EmeraldLight
 import com.example.ui.theme.GoldAccent
+
+val SURAH_BADGE_SIZE = 24.dp
+
+@Composable
+fun SurahNumberBadge(
+    surahId: Int,
+    isActive: Boolean,
+    shape: Shape = RoundedCornerShape(7.dp),
+    showBorder: Boolean = true,
+    modifier: Modifier = Modifier
+) {
+    val density = LocalDensity.current
+    val fixedTextSize = with(density) { 9.5.dp.toSp() }
+    val fixedLineHeight = with(density) { 11.dp.toSp() }
+
+    Box(
+        modifier = modifier
+            .requiredSize(SURAH_BADGE_SIZE)
+            .clip(shape)
+            .background(
+                color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                shape = shape
+            )
+            .then(
+                if (showBorder) {
+                    Modifier.border(
+                        width = 1.dp,
+                        color = if (isActive) GoldAccent else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                        shape = shape
+                    )
+                } else {
+                    Modifier
+                }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = "$surahId",
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontWeight = FontWeight.Bold,
+                fontSize = fixedTextSize,
+                lineHeight = fixedLineHeight,
+                lineHeightStyle = LineHeightStyle(
+                    alignment = LineHeightStyle.Alignment.Center,
+                    trim = LineHeightStyle.Trim.Both
+                ),
+                letterSpacing = 0.sp,
+                fontFeatureSettings = "tnum",
+                platformStyle = PlatformTextStyle(includeFontPadding = false),
+                color = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 1.dp)
+                .testTag("surah_badge_text_$surahId")
+        )
+    }
+}
 
 @Composable
 fun SurahItemCard(
@@ -85,31 +153,14 @@ fun SurahItemCard(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Surah Number Badge (32dp compact icon next to Surah name)
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .background(
-                        color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(9.dp)
-                    )
-                    .border(
-                        width = 1.dp,
-                        color = if (isCurrent) GoldAccent else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                        shape = RoundedCornerShape(9.dp)
-                    )
-                    .testTag("surah_badge_${surah.id}"),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "${surah.id}",
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        color = if (isCurrent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                )
-            }
+            // Surah Number Badge (unified 24dp fixed icon next to Surah name)
+            SurahNumberBadge(
+                surahId = surah.id,
+                isActive = isCurrent,
+                shape = RoundedCornerShape(7.dp),
+                showBorder = true,
+                modifier = Modifier.testTag("surah_badge_${surah.id}")
+            )
 
             Spacer(modifier = Modifier.width(14.dp))
 
