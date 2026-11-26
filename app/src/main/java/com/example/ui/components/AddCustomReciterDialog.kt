@@ -49,7 +49,7 @@ fun AddCustomReciterDialog(
         text = {
             Column {
                 Text(
-                    text = "أدخل بيانات القارئ ورابط خادم الصوت (ينتهي بـ / ويقبل 001.mp3 إلى 114.mp3):",
+                    text = "أدخل بيانات القارئ ورابط خادم الصوت (HTTPS وينتهي بـ / ويقبل 001.mp3 إلى 114.mp3). يُحفظ القارئ محلياً على هذا الجهاز فقط ولا يُنشر لبقية المستخدمين:",
                     style = MaterialTheme.typography.bodySmall.copy(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

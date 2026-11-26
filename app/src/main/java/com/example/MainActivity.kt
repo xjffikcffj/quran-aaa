@@ -152,7 +152,8 @@ enum class QuranNavTab(val title: String, val icon: ImageVector, val tag: String
 fun QuranMainScreen(
     viewModel: QuranViewModel,
     pendingSurahNavigation: Int? = null,
-    onConsumedSurahNavigation: () -> Unit = {}
+    onConsumedSurahNavigation: () -> Unit = {},
+    isDeveloperPanelEnabled: Boolean = viewModel.isDeveloperToolsEnabled()
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -195,16 +196,24 @@ fun QuranMainScreen(
         }
     }
 
+    LaunchedEffect(isDeveloperPanelEnabled) {
+        if (!isDeveloperPanelEnabled) {
+            showDeveloperScreen = false
+        }
+    }
+
     LaunchedEffect(playerState.errorMessage) {
         playerState.errorMessage?.let { error ->
             snackbarHostState.showSnackbar(error)
         }
     }
 
-    BackHandler(enabled = showFullPlayer || showDeveloperScreen || selectedTab != 0) {
+    val isDeveloperViewActive = isDeveloperPanelEnabled && showDeveloperScreen
+
+    BackHandler(enabled = showFullPlayer || isDeveloperViewActive || selectedTab != 0) {
         when {
             showFullPlayer -> showFullPlayer = false
-            showDeveloperScreen -> showDeveloperScreen = false
+            isDeveloperViewActive -> showDeveloperScreen = false
             selectedTab != 0 -> selectedTab = 0
         }
     }
@@ -221,7 +230,7 @@ fun QuranMainScreen(
                     ) {
                         Column {
                             Text(
-                                text = if (showDeveloperScreen) "الإعدادات والإدارة" else "القرآن الكريم",
+                                text = if (isDeveloperViewActive) "أدوات المطوّر (نسخة التطوير)" else "القرآن الكريم",
                                 style = MaterialTheme.typography.titleLarge.copy(
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 20.sp,
@@ -239,7 +248,7 @@ fun QuranMainScreen(
                     }
                 },
                 navigationIcon = {
-                    if (showDeveloperScreen) {
+                    if (isDeveloperViewActive) {
                         IconButton(
                             onClick = { showDeveloperScreen = false },
                             modifier = Modifier.testTag("developer_back_btn")
@@ -287,15 +296,17 @@ fun QuranMainScreen(
                         }
                     }
 
-                    IconButton(
-                        onClick = { showDeveloperScreen = !showDeveloperScreen },
-                        modifier = Modifier.testTag("topbar_developer_settings")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "لوحة المطور والإعدادات",
-                            tint = if (showDeveloperScreen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    if (isDeveloperPanelEnabled) {
+                        IconButton(
+                            onClick = { showDeveloperScreen = !showDeveloperScreen },
+                            modifier = Modifier.testTag("topbar_developer_settings")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = "لوحة المطور (للتطوير فقط)",
+                                tint = if (isDeveloperViewActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -327,7 +338,7 @@ fun QuranMainScreen(
                     tonalElevation = 8.dp
                 ) {
                     QuranNavTab.values().forEachIndexed { index, tab ->
-                        val isSelected = !showDeveloperScreen && selectedTab == index
+                        val isSelected = !isDeveloperViewActive && selectedTab == index
                         NavigationBarItem(
                             selected = isSelected,
                             onClick = {
@@ -369,8 +380,11 @@ fun QuranMainScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            if (showDeveloperScreen) {
-                DeveloperScreen(viewModel = viewModel)
+            if (isDeveloperViewActive) {
+                DeveloperScreen(
+                    viewModel = viewModel,
+                    isAccessAllowed = isDeveloperPanelEnabled
+                )
             } else {
                 when (selectedTab) {
                     0 -> SurahsScreen(

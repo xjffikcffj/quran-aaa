@@ -122,9 +122,12 @@ fun SurahItemCard(
                         text = "سورة ${surah.name}",
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.Bold,
-                            fontSize = 17.sp,
+                            fontSize = 16.sp,
                             color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                        )
+                        ),
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .testTag("surah_name_${surah.id}")
                     )
 
                     if (!isAvailableForReciter) {
@@ -177,6 +180,8 @@ fun SurahItemCard(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.width(6.dp))
 
             // Quick Actions
             Row(

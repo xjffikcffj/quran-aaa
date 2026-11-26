@@ -24,6 +24,7 @@ import com.example.model.SleepTimerOption
 import com.example.model.Surah
 import com.example.player.PlayerManager
 import com.example.receiver.FridayReminderReceiver
+import com.example.security.DeveloperAccessPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -45,6 +46,13 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
 
     @VisibleForTesting
     internal var playerPrefsCommitterForTest: ((SharedPreferences.Editor) -> Boolean)? = null
+
+    @VisibleForTesting
+    internal var developerToolsEnabledForTest: Boolean? = null
+
+    fun isDeveloperToolsEnabled(): Boolean {
+        return developerToolsEnabledForTest ?: DeveloperAccessPolicy.isDeveloperToolsEnabled()
+    }
 
     val playerState: StateFlow<PlayerState> = playerManager.playerState
 
@@ -241,10 +249,20 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun triggerFridayReminderTest() {
+        if (!isDeveloperToolsEnabled()) {
+            return
+        }
         FridayReminderReceiver.showFridayNotification(getApplication())
     }
 
+    /**
+     * Adds a custom reciter locally on this device only (stored in Room).
+     * Custom reciters are NOT published or distributed to other users.
+     */
     fun addCustomReciter(name: String, serverUrl: String, availableCount: Int): Boolean {
+        if (!isDeveloperToolsEnabled()) {
+            return false
+        }
         val cleanName = name.trim()
         val trimmedUrl = serverUrl.trim()
         if (cleanName.isEmpty() || !Reciter.isValidHttpsServerUrl(trimmedUrl)) {
@@ -258,7 +276,7 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
             serverUrl = cleanUrl,
             availableSurahsCount = availableCount.coerceIn(1, 114),
             isCustom = true,
-            subInfo = "قارئ مخصص مضاف من لوحة المطور"
+            subInfo = "قارئ مخصص محلي (محفوظ على هذا الجهاز فقط)"
         )
         viewModelScope.launch {
             QuranApp.database.reciterDao().insertReciter(ReciterEntity.fromReciter(newReciter))
@@ -267,6 +285,9 @@ class QuranViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteCustomReciter(reciterId: String) {
+        if (!isDeveloperToolsEnabled()) {
+            return
+        }
         viewModelScope.launch {
             QuranApp.database.reciterDao().deleteCustomReciter(reciterId)
             if (playerState.value.currentReciter?.id == reciterId) {

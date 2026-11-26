@@ -1,19 +1,18 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Explicit data extraction policy for Android 12+ (API >= 31).
+   Using an explicit <include> allowlist ensures only non-personal app settings
+   (Friday reminder toggle) are included, preventing unintended backup or transfer of:
+   - Room database (bookmarks with personal notes, playback history, custom reciter URLs)
+   - Player SharedPreferences (per-reciter listening positions, custom reciter JSON)
+   - Downloaded MP3 files in files/quran_downloads
+   - Third-party AdMob / UMP / WebView SDK SharedPreferences
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <include domain="sharedpref" path="quran_prefs.xml" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <include domain="sharedpref" path="quran_prefs.xml" />
     </device-transfer>
-    -->
 </data-extraction-rules>

@@ -188,31 +188,37 @@ fun MiniPlayerBar(
                     // Exactly 3 controls in fixed physical LTR direction:
                     // Left: |◀ (Previous Surah), Center: Play/Pause, Right: ▶| (Next Surah)
                     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                        val controlButtonSize = 40.dp
+                        val controlIconSize = 22.dp
+
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             IconButton(
                                 onClick = onPrevClick,
                                 modifier = Modifier
-                                    .size(30.dp)
+                                    .size(controlButtonSize)
+                                    .clip(CircleShape)
                                     .testTag("mini_player_prev")
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.SkipPrevious,
                                     contentDescription = "السورة السابقة",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(controlIconSize)
                                 )
                             }
 
                             if (playerState.isBuffering) {
                                 Box(
-                                    modifier = Modifier.size(34.dp),
+                                    modifier = Modifier
+                                        .size(controlButtonSize)
+                                        .testTag("mini_player_buffering"),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     CircularProgressIndicator(
-                                        modifier = Modifier.size(22.dp),
+                                        modifier = Modifier.size(controlIconSize),
                                         color = MaterialTheme.colorScheme.primary,
                                         strokeWidth = 2.dp
                                     )
@@ -221,15 +227,16 @@ fun MiniPlayerBar(
                                 IconButton(
                                     onClick = onPlayPauseClick,
                                     modifier = Modifier
-                                        .size(34.dp)
+                                        .size(controlButtonSize)
                                         .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                        .clip(CircleShape)
                                         .testTag("mini_player_toggle")
                                 ) {
                                     Icon(
                                         imageVector = if (playerState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                         contentDescription = if (playerState.isPlaying) "إيقاف مؤقت" else "تشغيل",
                                         tint = MaterialTheme.colorScheme.onPrimary,
-                                        modifier = Modifier.size(19.dp)
+                                        modifier = Modifier.size(controlIconSize)
                                     )
                                 }
                             }
@@ -237,14 +244,15 @@ fun MiniPlayerBar(
                             IconButton(
                                 onClick = onNextClick,
                                 modifier = Modifier
-                                    .size(30.dp)
+                                    .size(controlButtonSize)
+                                    .clip(CircleShape)
                                     .testTag("mini_player_next")
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.SkipNext,
                                     contentDescription = "السورة التالية",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(controlIconSize)
                                 )
                             }
                         }

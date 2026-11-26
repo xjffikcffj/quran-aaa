@@ -69,8 +69,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun DeveloperScreen(
     viewModel: QuranViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isAccessAllowed: Boolean = viewModel.isDeveloperToolsEnabled()
 ) {
+    if (!isAccessAllowed) {
+        return
+    }
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
     val coroutineScope = rememberCoroutineScope()
@@ -148,7 +152,7 @@ fun DeveloperScreen(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "لوحة المطور والإعدادات المتقدمة",
+                            text = "لوحة المطور (نسخة التطوير فقط)",
                             style = MaterialTheme.typography.titleLarge.copy(
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onPrimary
@@ -157,7 +161,7 @@ fun DeveloperScreen(
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "إدارة القراء المخصصين، تذكير يوم الجمعة المحلي، والنسخ الاحتياطي الشامل للبيانات على جهازك.",
+                        text = "معطّلة في نسخة المستخدمين النهائية لعدم توفر مصادقة موثوقة. إضافة القراء هنا وتذكير الجمعة عبر AlarmManager محليّان على هذا الجهاز فقط ولا يُنشران لبقية المستخدمين.",
                         style = MaterialTheme.typography.bodySmall.copy(
                             color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f),
                             fontSize = 12.sp
@@ -208,7 +212,7 @@ fun DeveloperScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "يمكنك إضافة قراء إضافيين بروابط HTTPS لخوادمهم الصوتية، وتُحفظ البيانات محلياً في قاعدة Room وتستعاد تلقائياً بعد إعادة التشغيل.",
+                        text = "إضافة قارئ هنا عبر QuranViewModel.addCustomReciter تحفظ البيانات محلياً في قاعدة Room على هذا الجهاز فقط ولا تُنشر لبقية المستخدمين.",
                         style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
                     )
 
@@ -300,7 +304,7 @@ fun DeveloperScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "جدولة تنبيه محلي أسبوعي صباح يوم الجمعة (9:00 صباحاً) عبر AlarmManager للتذكير بسورة الكهف دون الحاجة لخادم خارجي.",
+                        text = "جدولة تنبيه محلي على هذا الجهاز فقط كل جمعة (9:00 صباحاً) عبر AlarmManager للتذكير بسورة الكهف دون إرسال إشعارات عامة للمستخدمين.",
                         style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
                     )
 
