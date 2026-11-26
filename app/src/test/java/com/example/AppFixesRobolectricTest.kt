@@ -395,10 +395,53 @@ class AppFixesRobolectricTest {
         assertFalse("Arabic surah name overflowed height", layout.didOverflowHeight)
 
         val nameBounds = node.getUnclippedBoundsInRoot()
+        val badgeNode = composeRule.onNodeWithTag("surah_badge_3", useUnmergedTree = true)
+        badgeNode.assertIsDisplayed()
+        val badgeBounds = badgeNode.getUnclippedBoundsInRoot()
+        assertEquals(32f, badgeBounds.width.value, 0.5f)
+        assertEquals(32f, badgeBounds.height.value, 0.5f)
+
+        val playBounds = composeRule.onNodeWithTag("play_button_3", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        assertTrue("Surah badge icon must be smaller than play button", badgeBounds.width < playBounds.width)
+
         val favBounds = composeRule.onNodeWithTag("fav_button_3", useUnmergedTree = true).getUnclippedBoundsInRoot()
         assertTrue(nameBounds.width > 0.dp && nameBounds.height > 0.dp)
         // In RTL, name is on the right of quick actions, so favBounds.right <= nameBounds.left
         assertTrue("Surah name overlapped action buttons", favBounds.right <= nameBounds.left + 0.5.dp)
+    }
+
+    @Test
+    fun `SurahItemCard compact 32dp badge displays 3-digit surah number cleanly`() {
+        val surah114 = QuranData.getSurahById(114)!! // الناس
+
+        composeRule.setContent {
+            QuranAppTheme {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                    Box(modifier = Modifier.width(360.dp)) {
+                        SurahItemCard(
+                            surah = surah114,
+                            isPlaying = true,
+                            isCurrent = true,
+                            isFavorite = false,
+                            isDownloaded = false,
+                            isAvailableForReciter = true,
+                            onCardClick = {},
+                            onPlayClick = {},
+                            onFavoriteClick = {},
+                            onDownloadClick = {},
+                            onBookmarkClick = {}
+                        )
+                    }
+                }
+            }
+        }
+
+        composeRule.waitForIdle()
+        val badgeBounds = composeRule.onNodeWithTag("surah_badge_114", useUnmergedTree = true)
+            .assertIsDisplayed()
+            .getUnclippedBoundsInRoot()
+        assertEquals(32f, badgeBounds.width.value, 0.5f)
+        assertEquals(32f, badgeBounds.height.value, 0.5f)
     }
 
     @Test

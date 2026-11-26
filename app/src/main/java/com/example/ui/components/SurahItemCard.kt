@@ -85,25 +85,27 @@ fun SurahItemCard(
                 .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Surah Number Badge
+            // Surah Number Badge (32dp compact icon next to Surah name)
             Box(
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(32.dp)
                     .background(
                         color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(12.dp)
+                        shape = RoundedCornerShape(9.dp)
                     )
                     .border(
                         width = 1.dp,
                         color = if (isCurrent) GoldAccent else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                        shape = RoundedCornerShape(12.dp)
-                    ),
+                        shape = RoundedCornerShape(9.dp)
+                    )
+                    .testTag("surah_badge_${surah.id}"),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = "${surah.id}",
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
                         color = if (isCurrent) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 )
